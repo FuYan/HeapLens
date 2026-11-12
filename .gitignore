@@ -1,0 +1,19 @@
+# 构建产物
+[Bb]in/
+[Oo]bj/
+*_old/
+*.user
+
+# 内存转储（大文件，不入库）
+*.DMP
+*.dmp
+
+# 截图 / 临时产物
+heaplens_screenshot.png
+
+# 工作数据
+.workbuddy/
+
+# IDE
+.vs/
+*.suo

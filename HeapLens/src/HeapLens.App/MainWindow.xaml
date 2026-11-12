@@ -1,0 +1,395 @@
+<Window x:Class="HeapLens.App.MainWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:local="clr-namespace:HeapLens.App"
+        Title="HeapLens — .NET 内存分析器"
+        Width="1280" Height="820"
+        Background="#F1F5F9">
+    <Window.Resources>
+        <local:BytesConverter x:Key="Bytes"/>
+        <local:HexConverter x:Key="Hex"/>
+    </Window.Resources>
+
+    <DockPanel>
+        <!-- 工具栏 -->
+        <Border DockPanel.Dock="Top" Background="White" BorderBrush="{StaticResource BorderBrushLight}" BorderThickness="0,0,0,1" Padding="12,10">
+            <Grid>
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="Auto"/>
+                    <ColumnDefinition Width="240"/>
+                    <ColumnDefinition Width="Auto"/>
+                    <ColumnDefinition Width="Auto"/>
+                    <ColumnDefinition Width="*"/>
+                    <ColumnDefinition Width="Auto"/>
+                </Grid.ColumnDefinitions>
+                <TextBlock Grid.Column="0" Text="目标进程:" VerticalAlignment="Center" Margin="0,0,8,0" Foreground="{StaticResource TextSecondaryBrush}"/>
+                <ComboBox Grid.Column="1" ItemsSource="{Binding Processes}" SelectedItem="{Binding SelectedProcess}" DisplayMemberPath="DisplayText" VerticalAlignment="Center" MinHeight="28"/>
+                <Button Grid.Column="2" Content="刷新" Command="{Binding RefreshProcessesCommand}" Style="{StaticResource ToolButton}"/>
+                <Button Grid.Column="3" Content="捕获快照并分析" Command="{Binding CaptureSnapshotCommand}" Style="{StaticResource ToolButton}"
+                        Background="{StaticResource AccentLightBrush}" BorderBrush="{StaticResource AccentBrush}" FontWeight="SemiBold"/>
+                <Button Grid.Column="5" Content="打开 Dump 文件…" Command="{Binding OpenDumpCommand}" Style="{StaticResource ToolButton}" Margin="0"/>
+            </Grid>
+        </Border>
+
+        <!-- 状态栏 -->
+        <Border DockPanel.Dock="Bottom" Background="White" BorderBrush="{StaticResource BorderBrushLight}" BorderThickness="0,1,0,0" Padding="12,6">
+            <TextBlock Text="{Binding Status}" Foreground="{StaticResource TextSecondaryBrush}" FontSize="12"/>
+        </Border>
+
+        <!-- 主体 -->
+        <TabControl Margin="12" Background="Transparent" BorderThickness="0">
+
+            <!-- ============ 概览 ============ -->
+            <TabItem Header="概览">
+                <ScrollViewer VerticalScrollBarVisibility="Auto">
+                    <StackPanel Margin="4">
+                        <!-- 指标卡片 -->
+                        <WrapPanel>
+                            <Border Style="{StaticResource Card}" Width="190">
+                                <StackPanel>
+                                    <TextBlock Text="存活对象" Style="{StaticResource CardLabel}"/>
+                                    <TextBlock Text="{Binding Overview.ObjectCount, StringFormat={}{0:N0}}" Style="{StaticResource CardValue}"/>
+                                </StackPanel>
+                            </Border>
+                            <Border Style="{StaticResource Card}" Width="190">
+                                <StackPanel>
+                                    <TextBlock Text="对象总大小" Style="{StaticResource CardLabel}"/>
+                                    <TextBlock Text="{Binding Overview.TotalObjectSize, Converter={StaticResource Bytes}}" Style="{StaticResource CardValue}"/>
+                                </StackPanel>
+                            </Border>
+                            <Border Style="{StaticResource Card}" Width="190">
+                                <StackPanel>
+                                    <TextBlock Text="已提交内存" Style="{StaticResource CardLabel}"/>
+                                    <TextBlock Text="{Binding Overview.CommittedSize, Converter={StaticResource Bytes}}" Style="{StaticResource CardValue}"/>
+                                </StackPanel>
+                            </Border>
+                            <Border Style="{StaticResource Card}" Width="190">
+                                <StackPanel>
+                                    <TextBlock Text="Free / 碎片" Style="{StaticResource CardLabel}"/>
+                                    <TextBlock Text="{Binding Overview.FreeSize, Converter={StaticResource Bytes}}" Style="{StaticResource CardValue}"/>
+                                </StackPanel>
+                            </Border>
+                            <Border Style="{StaticResource Card}" Width="190">
+                                <StackPanel>
+                                    <TextBlock Text="GC 模式" Style="{StaticResource CardLabel}"/>
+                                    <TextBlock>
+                                        <TextBlock.Style>
+                                            <Style TargetType="TextBlock" BasedOn="{StaticResource CardValue}">
+                                                <Setter Property="Text" Value="Workstation"/>
+                                                <Style.Triggers>
+                                                    <DataTrigger Binding="{Binding Overview.IsServerGc}" Value="True">
+                                                        <Setter Property="Text" Value="Server"/>
+                                                    </DataTrigger>
+                                                </Style.Triggers>
+                                            </Style>
+                                        </TextBlock.Style>
+                                    </TextBlock>
+                                </StackPanel>
+                            </Border>
+                            <Border Style="{StaticResource Card}" Width="230">
+                                <StackPanel>
+                                    <TextBlock Text="运行时" Style="{StaticResource CardLabel}"/>
+                                    <TextBlock Text="{Binding Overview.RuntimeVersion}" Style="{StaticResource CardValue}" FontSize="14"/>
+                                </StackPanel>
+                            </Border>
+                        </WrapPanel>
+
+                        <!-- 代龄分布 -->
+                        <Border Style="{StaticResource Panel}" Margin="0,12,0,0">
+                            <StackPanel>
+                                <TextBlock Text="代龄分布" FontWeight="SemiBold" FontSize="14" Foreground="{StaticResource TextPrimaryBrush}" Margin="0,0,0,10"/>
+                                <ItemsControl ItemsSource="{Binding GenBars}">
+                                    <ItemsControl.ItemTemplate>
+                                        <DataTemplate>
+                                            <StackPanel Orientation="Horizontal" Margin="0,2">
+                                                <TextBlock Text="{Binding Label}" Width="46" Foreground="{StaticResource TextSecondaryBrush}" FontSize="12"/>
+                                                <Border Width="{Binding Width}" Height="16" CornerRadius="3">
+                                                    <Border.Background>
+                                                        <SolidColorBrush Color="{Binding Color}"/>
+                                                    </Border.Background>
+                                                </Border>
+                                                <TextBlock Text="{Binding Size, Converter={StaticResource Bytes}}" Margin="8,0,0,0" FontSize="12" Foreground="{StaticResource TextPrimaryBrush}"/>
+                                            </StackPanel>
+                                        </DataTemplate>
+                                    </ItemsControl.ItemTemplate>
+                                </ItemsControl>
+                            </StackPanel>
+                        </Border>
+
+                        <!-- 堆段 -->
+                        <Border Style="{StaticResource Panel}" Margin="0,12,0,0">
+                            <StackPanel>
+                                <TextBlock Text="堆段（Segments）" FontWeight="SemiBold" FontSize="14" Foreground="{StaticResource TextPrimaryBrush}" Margin="0,0,0,10"/>
+                                <DataGrid ItemsSource="{Binding Segments}" MaxHeight="320">
+                                    <DataGrid.Columns>
+                                        <DataGridTextColumn Header="起始地址" Binding="{Binding Start, Converter={StaticResource Hex}}" Width="120"/>
+                                        <DataGridTextColumn Header="大小" Binding="{Binding Length, Converter={StaticResource Bytes}}" Width="90"/>
+                                        <DataGridTextColumn Header="已提交" Binding="{Binding Committed, Converter={StaticResource Bytes}}" Width="90"/>
+                                        <DataGridTextColumn Header="Gen0" Binding="{Binding Gen0Size, Converter={StaticResource Bytes}}" Width="80"/>
+                                        <DataGridTextColumn Header="Gen1" Binding="{Binding Gen1Size, Converter={StaticResource Bytes}}" Width="80"/>
+                                        <DataGridTextColumn Header="Gen2" Binding="{Binding Gen2Size, Converter={StaticResource Bytes}}" Width="80"/>
+                                        <DataGridTextColumn Header="类型" Binding="{Binding SegType}" Width="*"/>
+                                    </DataGrid.Columns>
+                                </DataGrid>
+                            </StackPanel>
+                        </Border>
+                    </StackPanel>
+                </ScrollViewer>
+            </TabItem>
+
+            <!-- ============ 类型分布 ============ -->
+            <TabItem Header="类型分布">
+                <DockPanel Margin="4">
+                    <Border DockPanel.Dock="Top" Padding="0,0,0,10">
+                        <StackPanel Orientation="Horizontal">
+                            <TextBlock Text="筛选类型:" VerticalAlignment="Center" Margin="0,0,8,0" Foreground="{StaticResource TextSecondaryBrush}"/>
+                            <TextBox Width="320" Text="{Binding TypeFilter, UpdateSourceTrigger=PropertyChanged}" Padding="6,4" VerticalAlignment="Center"/>
+                            <TextBlock Text="（双击行查看实例与保留路径）" VerticalAlignment="Center" Margin="16,0,0,0" Foreground="{StaticResource TextSecondaryBrush}" FontSize="12"/>
+                        </StackPanel>
+                    </Border>
+                    <DataGrid x:Name="TypesGrid" ItemsSource="{Binding Types}" MouseDoubleClick="TypesGrid_OnMouseDoubleClick">
+                        <DataGrid.Columns>
+                            <DataGridTextColumn Header="类型" Binding="{Binding Name}" Width="460"/>
+                            <DataGridTextColumn Header="数量" Binding="{Binding Count, StringFormat={}{0:N0}}" Width="100"/>
+                            <DataGridTextColumn Header="总大小" Binding="{Binding TotalSize, Converter={StaticResource Bytes}}" Width="110"/>
+                            <DataGridTextColumn Header="平均大小" Binding="{Binding AvgSize, Converter={StaticResource Bytes}}" Width="100"/>
+                            <DataGridTextColumn Header="最大" Binding="{Binding MaxSize, Converter={StaticResource Bytes}}" Width="100"/>
+                            <DataGridTextColumn Header="Gen0" Binding="{Binding Gen0Count, StringFormat={}{0:N0}}" Width="80"/>
+                            <DataGridTextColumn Header="Gen1" Binding="{Binding Gen1Count, StringFormat={}{0:N0}}" Width="80"/>
+                            <DataGridTextColumn Header="Gen2" Binding="{Binding Gen2Count, StringFormat={}{0:N0}}" Width="80"/>
+                            <DataGridTextColumn Header="LOH" Binding="{Binding LohCount, StringFormat={}{0:N0}}" Width="80"/>
+                        </DataGrid.Columns>
+                    </DataGrid>
+                </DockPanel>
+            </TabItem>
+
+            <!-- ============ 实例与保留路径 ============ -->
+            <TabItem Header="对象与保留路径">
+                <Grid Margin="4">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="380"/>
+                        <ColumnDefinition Width="*"/>
+                    </Grid.ColumnDefinitions>
+
+                    <DockPanel Grid.Column="0" Margin="0,0,12,0">
+                        <TextBlock DockPanel.Dock="Top" Text="{Binding SelectedType.Name, StringFormat='{}{0} 的实例（按大小降序）'}"
+                                   FontWeight="SemiBold" Foreground="{StaticResource TextPrimaryBrush}" Margin="0,0,0,8"/>
+                        <DataGrid ItemsSource="{Binding Instances}" SelectedItem="{Binding SelectedInstance}">
+                            <DataGrid.Columns>
+                                <DataGridTextColumn Header="地址" Binding="{Binding Address, Converter={StaticResource Hex}}" Width="130"/>
+                                <DataGridTextColumn Header="大小" Binding="{Binding Size, Converter={StaticResource Bytes}}" Width="80"/>
+                                <DataGridTextColumn Header="预览" Binding="{Binding Preview}" Width="*"/>
+                            </DataGrid.Columns>
+                        </DataGrid>
+                    </DockPanel>
+
+                    <DockPanel Grid.Column="1">
+                        <TextBlock DockPanel.Dock="Top" Text="{Binding RetentionTitle}" FontWeight="SemiBold"
+                                   Foreground="{StaticResource TextPrimaryBrush}" Margin="0,0,0,8" TextWrapping="Wrap"/>
+                        <ScrollViewer VerticalScrollBarVisibility="Auto">
+                            <ItemsControl ItemsSource="{Binding RetentionNodes}">
+                                <ItemsControl.ItemTemplate>
+                                    <DataTemplate>
+                                        <Border Background="White" BorderBrush="{StaticResource BorderBrushLight}" BorderThickness="1" CornerRadius="6" Padding="10,8" Margin="0,0,0,6">
+                                            <StackPanel>
+                                                <StackPanel Orientation="Horizontal">
+                                                    <Border Background="{StaticResource AccentLightBrush}" CornerRadius="3" Padding="6,2">
+                                                        <TextBlock Text="{Binding TypeName}" Foreground="{StaticResource AccentBrush}" FontSize="12" FontWeight="SemiBold"/>
+                                                    </Border>
+                                                    <TextBlock Text="{Binding FieldName, StringFormat='.{}{0}'}" Margin="8,0,0,0" VerticalAlignment="Center"
+                                                               Foreground="#DB2777" FontWeight="SemiBold" FontSize="12"/>
+                                                </StackPanel>
+                                                <StackPanel Orientation="Horizontal" Margin="0,4,0,0">
+                                                    <TextBlock Text="{Binding Address, Converter={StaticResource Hex}}" Foreground="{StaticResource TextSecondaryBrush}" FontSize="11" Width="120"/>
+                                                    <TextBlock Text="{Binding Size, Converter={StaticResource Bytes}}" Foreground="{StaticResource TextSecondaryBrush}" FontSize="11" Width="70"/>
+                                                    <TextBlock Text="{Binding Preview}" Foreground="{StaticResource TextSecondaryBrush}" FontSize="11"/>
+                                                </StackPanel>
+                                            </StackPanel>
+                                        </Border>
+                                    </DataTemplate>
+                                </ItemsControl.ItemTemplate>
+                            </ItemsControl>
+                        </ScrollViewer>
+                    </DockPanel>
+                </Grid>
+            </TabItem>
+
+            <!-- ============ 调用链（引用树） ============ -->
+            <TabItem Header="调用链">
+                <Grid Margin="4">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="330"/>
+                        <ColumnDefinition Width="12"/>
+                        <ColumnDefinition Width="*"/>
+                    </Grid.ColumnDefinitions>
+
+                    <!-- 左：类型 → 实例 快速定位 -->
+                    <DockPanel Grid.Column="0">
+                        <StackPanel DockPanel.Dock="Top" Margin="0,0,0,8">
+                            <TextBlock Text="按类型定位实例：双击类型列出实例，选择实例即显示调用链" TextWrapping="Wrap"
+                                       FontSize="11" Foreground="{StaticResource TextSecondaryBrush}" Margin="0,0,0,6"/>
+                            <TextBox Text="{Binding TypeFilter, UpdateSourceTrigger=PropertyChanged}" Padding="6,4"/>
+                        </StackPanel>
+                        <Grid>
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="*"/>
+                                <RowDefinition Height="8"/>
+                                <RowDefinition Height="*"/>
+                            </Grid.RowDefinitions>
+                            <DataGrid x:Name="ChainTypesGrid" Grid.Row="0" ItemsSource="{Binding Types}"
+                                      MouseDoubleClick="ChainTypesGrid_OnMouseDoubleClick" FontSize="11">
+                                <DataGrid.Columns>
+                                    <DataGridTextColumn Header="类型" Binding="{Binding Name}" Width="*"/>
+                                    <DataGridTextColumn Header="数量" Binding="{Binding Count, StringFormat={}{0:N0}}" Width="70"/>
+                                </DataGrid.Columns>
+                            </DataGrid>
+                            <DataGrid Grid.Row="2" ItemsSource="{Binding ChainInstances}"
+                                      SelectedItem="{Binding ChainSelectedInstance}"
+                                      MouseDoubleClick="ChainInstancesGrid_OnMouseDoubleClick" FontSize="11">
+                                <DataGrid.Columns>
+                                    <DataGridTextColumn Header="地址" Binding="{Binding Address, Converter={StaticResource Hex}}" Width="120"/>
+                                    <DataGridTextColumn Header="大小" Binding="{Binding Size, Converter={StaticResource Bytes}}" Width="70"/>
+                                    <DataGridTextColumn Header="预览" Binding="{Binding Preview}" Width="*"/>
+                                </DataGrid.Columns>
+                            </DataGrid>
+                        </Grid>
+                    </DockPanel>
+
+                    <!-- 右：引用树 + 调用链详情 -->
+                    <Grid Grid.Column="2">
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto"/>
+                            <RowDefinition Height="*"/>
+                        </Grid.RowDefinitions>
+                        <TextBlock Grid.Row="0" Text="{Binding ChainTitle}" FontWeight="SemiBold"
+                                   Foreground="{StaticResource TextPrimaryBrush}" TextWrapping="Wrap" Margin="0,0,0,8"/>
+                        <Grid Grid.Row="1">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*"/>
+                                <ColumnDefinition Width="12"/>
+                                <ColumnDefinition Width="*"/>
+                            </Grid.ColumnDefinitions>
+
+                            <!-- 引用树：GC 根 → 下级引用，可逐层展开 -->
+                            <Border Grid.Column="0" Style="{StaticResource Panel}">
+                                <DockPanel>
+                                    <TextBlock DockPanel.Dock="Top" Text="GC 根引用树（点击节点查看调用链，展开节点浏览下级引用）"
+                                               FontSize="11" Foreground="{StaticResource TextSecondaryBrush}" Margin="0,0,0,6" TextWrapping="Wrap"/>
+                                    <TreeView ItemsSource="{Binding ChainRoots}" Padding="2"
+                                              BorderThickness="0" Background="Transparent"
+                                              SelectedItemChanged="ChainTree_OnSelectedItemChanged">
+                                        <TreeView.ItemContainerStyle>
+                                            <Style TargetType="TreeViewItem">
+                                                <EventSetter Event="TreeViewItem.Expanded" Handler="ChainTreeItem_OnExpanded"/>
+                                                <Setter Property="Padding" Value="2,1"/>
+                                            </Style>
+                                        </TreeView.ItemContainerStyle>
+                                        <TreeView.ItemTemplate>
+                                            <HierarchicalDataTemplate ItemsSource="{Binding Children}">
+                                                <TextBlock Text="{Binding Title}" FontSize="11.5" ToolTip="{Binding Title}"/>
+                                            </HierarchicalDataTemplate>
+                                        </TreeView.ItemTemplate>
+                                    </TreeView>
+                                </DockPanel>
+                            </Border>
+
+                            <!-- 调用链详情：保留路径 + 直接引用者 -->
+                            <Border Grid.Column="2" Style="{StaticResource Panel}">
+                                <DockPanel>
+                                    <TextBlock DockPanel.Dock="Top" Text="调用链（GC 根 → 对象 的保留路径，即时计算）"
+                                               FontSize="11" Foreground="{StaticResource TextSecondaryBrush}" Margin="0,0,0,6"/>
+                                    <ScrollViewer VerticalScrollBarVisibility="Auto">
+                                        <StackPanel>
+                                            <ItemsControl ItemsSource="{Binding ChainPaths}">
+                                                <ItemsControl.ItemTemplate>
+                                                    <DataTemplate>
+                                                        <StackPanel Margin="0,0,0,12">
+                                                            <TextBlock Text="{Binding Title}" FontWeight="SemiBold" FontSize="12"
+                                                                       Foreground="{StaticResource AccentBrush}" Margin="0,0,0,6"/>
+                                                            <ItemsControl ItemsSource="{Binding Nodes}">
+                                                                <ItemsControl.ItemTemplate>
+                                                                    <DataTemplate>
+                                                                        <Border Background="White" BorderBrush="{StaticResource BorderBrushLight}" BorderThickness="1" CornerRadius="6" Padding="10,8" Margin="0,0,0,6">
+                                                                            <StackPanel>
+                                                                                <StackPanel Orientation="Horizontal">
+                                                                                    <Border Background="{StaticResource AccentLightBrush}" CornerRadius="3" Padding="6,2">
+                                                                                        <TextBlock Text="{Binding TypeName}" Foreground="{StaticResource AccentBrush}" FontSize="12" FontWeight="SemiBold"/>
+                                                                                    </Border>
+                                                                                    <TextBlock Text="{Binding FieldName, StringFormat='.{}{0}'}" Margin="8,0,0,0" VerticalAlignment="Center"
+                                                                                               Foreground="#DB2777" FontWeight="SemiBold" FontSize="12"/>
+                                                                                </StackPanel>
+                                                                                <StackPanel Orientation="Horizontal" Margin="0,4,0,0">
+                                                                                    <TextBlock Text="{Binding Address, Converter={StaticResource Hex}}" Foreground="{StaticResource TextSecondaryBrush}" FontSize="11" Width="120"/>
+                                                                                    <TextBlock Text="{Binding Size, Converter={StaticResource Bytes}}" Foreground="{StaticResource TextSecondaryBrush}" FontSize="11" Width="70"/>
+                                                                                    <TextBlock Text="{Binding Preview}" Foreground="{StaticResource TextSecondaryBrush}" FontSize="11"/>
+                                                                                </StackPanel>
+                                                                            </StackPanel>
+                                                                        </Border>
+                                                                    </DataTemplate>
+                                                                </ItemsControl.ItemTemplate>
+                                                            </ItemsControl>
+                                                        </StackPanel>
+                                                    </DataTemplate>
+                                                </ItemsControl.ItemTemplate>
+                                            </ItemsControl>
+
+                                            <TextBlock Text="直接引用者（调用链上一层的全部候选）" FontWeight="SemiBold" FontSize="12"
+                                                       Foreground="{StaticResource TextPrimaryBrush}" Margin="0,4,0,6"/>
+                                            <ItemsControl ItemsSource="{Binding ChainReferrers}">
+                                                <ItemsControl.ItemTemplate>
+                                                    <DataTemplate>
+                                                        <Border Background="White" BorderBrush="{StaticResource BorderBrushLight}" BorderThickness="1" CornerRadius="4" Padding="8,4" Margin="0,0,0,4">
+                                                            <StackPanel Orientation="Horizontal">
+                                                                <TextBlock Text="{Binding Parent, Converter={StaticResource Hex}}" Foreground="{StaticResource TextSecondaryBrush}" FontSize="11" Width="120"/>
+                                                                <TextBlock Text="{Binding Field, StringFormat='.{}{0}'}" Foreground="#DB2777" FontSize="11" Width="110"/>
+                                                                <TextBlock Text="{Binding TypeName}" Foreground="{StaticResource TextPrimaryBrush}" FontSize="11" Width="220"/>
+                                                                <TextBlock Text="{Binding Size, Converter={StaticResource Bytes}}" Foreground="{StaticResource TextSecondaryBrush}" FontSize="11"/>
+                                                            </StackPanel>
+                                                        </Border>
+                                                    </DataTemplate>
+                                                </ItemsControl.ItemTemplate>
+                                            </ItemsControl>
+                                        </StackPanel>
+                                    </ScrollViewer>
+                                </DockPanel>
+                            </Border>
+                        </Grid>
+                    </Grid>
+                </Grid>
+            </TabItem>
+
+            <!-- ============ 快照对比 ============ -->
+            <TabItem Header="快照对比">
+                <DockPanel Margin="4">
+                    <Border DockPanel.Dock="Top" Padding="0,0,0,10">
+                        <StackPanel>
+                            <StackPanel Orientation="Horizontal" Margin="0,0,0,8">
+                                <TextBlock Text="基准快照 A:" VerticalAlignment="Center" Width="80" Foreground="{StaticResource TextSecondaryBrush}"/>
+                                <TextBox Width="560" Text="{Binding DiffPathA}" Padding="6,4" IsReadOnly="True"/>
+                                <Button Content="浏览…" Command="{Binding OpenDiffACommand}" Style="{StaticResource ToolButton}" Margin="8,0,0,0"/>
+                            </StackPanel>
+                            <StackPanel Orientation="Horizontal">
+                                <TextBlock Text="对比快照 B:" VerticalAlignment="Center" Width="80" Foreground="{StaticResource TextSecondaryBrush}"/>
+                                <TextBox Width="560" Text="{Binding DiffPathB}" Padding="6,4" IsReadOnly="True"/>
+                                <Button Content="浏览…" Command="{Binding OpenDiffBCommand}" Style="{StaticResource ToolButton}" Margin="8,0,0,0"/>
+                                <Button Content="开始对比" Command="{Binding RunDiffCommand}" Style="{StaticResource ToolButton}"
+                                        Background="{StaticResource AccentLightBrush}" BorderBrush="{StaticResource AccentBrush}" FontWeight="SemiBold"/>
+                            </StackPanel>
+                        </StackPanel>
+                    </Border>
+                    <DataGrid ItemsSource="{Binding DiffRows}">
+                        <DataGrid.Columns>
+                            <DataGridTextColumn Header="类型" Binding="{Binding Name}" Width="420"/>
+                            <DataGridTextColumn Header="数量 A" Binding="{Binding CountA, StringFormat={}{0:N0}}" Width="100"/>
+                            <DataGridTextColumn Header="数量 B" Binding="{Binding CountB, StringFormat={}{0:N0}}" Width="100"/>
+                            <DataGridTextColumn Header="Δ 数量" Binding="{Binding DeltaCount, StringFormat={}{0:+#,##0;-#,##0;0}}" Width="100"/>
+                            <DataGridTextColumn Header="大小 A" Binding="{Binding SizeA, Converter={StaticResource Bytes}}" Width="100"/>
+                            <DataGridTextColumn Header="大小 B" Binding="{Binding SizeB, Converter={StaticResource Bytes}}" Width="100"/>
+                            <DataGridTextColumn Header="Δ 大小" Binding="{Binding DeltaSize, Converter={StaticResource Bytes}}" Width="110"/>
+                        </DataGrid.Columns>
+                    </DataGrid>
+                </DockPanel>
+            </TabItem>
+        </TabControl>
+    </DockPanel>
+</Window>
