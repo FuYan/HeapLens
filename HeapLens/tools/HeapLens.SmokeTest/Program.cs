@@ -6,13 +6,15 @@
 //   SmokeTest index <dump文件>                     构建引用索引并输出统计（含耗时）
 //   SmokeTest chains <dump文件> <类型> [N]          查看某类型前 N 个实例的调用链（保留路径）
 //   SmokeTest refs <dump文件> <对象地址(hex)>       查看对象的直接引用者 / 被引用对象
+//   SmokeTest merged <dump文件> <类型> [N]           类型所有实例的持有链合并树（对标 dotMemory）
+//   SmokeTest retained <dump文件> [--verify]         支配树 Retained Size（含正确性校验）
 //   SmokeTest diff <dumpA> <dumpB>                 快照对比
 using System.Diagnostics;
 using HeapLens.Core;
 
 if (args.Length == 0)
 {
-    Console.WriteLine("用法: SmokeTest capture <pid> <dump> | analyze <dump> [--top N] | instances <dump> <类型> [N] | path <dump> <addr> | index <dump> | chains <dump> <类型> [N] | refs <dump> <addr> | diff <a> <b>");
+    Console.WriteLine("用法: SmokeTest capture <pid> <dump> | analyze <dump> [--top N] | instances <dump> <类型> [N] | path <dump> <addr> | index <dump> | chains <dump> <类型> [N] | refs <dump> <addr> | merged <dump> <类型> [N] | retained <dump> [--verify] | diff <a> <b>");
     return 0;
 }
 
@@ -115,6 +117,67 @@ switch (args[0])
             Console.WriteLine($"  0x{inst.Address:X12}  {FormatBytes(inst.Size),10}  {inst.Preview ?? ""}");
         return 0;
     }
+    case "selftest":
+    {
+        // 合成图与暴力法对拍支配树（随机 DAG / 长链 / 带环图，多种规模）
+        int failures = 0;
+        foreach ((int nodes, int seed, bool withCycles) in new[] { (60, 1, true), (200, 2, true), (500, 3, false), (800, 4, true) })
+        {
+            var rng = new Random(seed);
+            var edges = new List<(int, int)>();
+            var shallow = new long[nodes];
+            for (int i = 0; i < nodes; i++) shallow[i] = rng.Next(1, 500);
+            for (int i = 1; i < nodes; i++) edges.Add((rng.Next(0, i), i));           // 保证全部可达
+            for (int i = 0; i < nodes; i++) edges.Add((i, (i + 1) % nodes));          // 长链/环
+            int extra = withCycles ? nodes * 2 : nodes;
+            for (int i = 0; i < extra; i++) edges.Add((rng.Next(nodes), rng.Next(nodes)));
+            DominatorAnalysis.Graph g = DominatorAnalysis.Graph.FromEdges(nodes, 0, shallow, edges);
+            IReadOnlyList<string> errors = DominatorAnalysis.Verify(g);
+            Console.WriteLine($"  n={nodes,4} seed={seed} cycles={withCycles}: {(errors.Count == 0 ? "通过" : "失败")}");
+            foreach (string e in errors.Take(5)) Console.WriteLine("    ✗ " + e);
+            failures += errors.Count == 0 ? 0 : 1;
+        }
+        Console.WriteLine(failures == 0 ? "selftest 全部通过" : $"selftest {failures} 组失败");
+        return failures == 0 ? 0 : 1;
+    }
+    case "merged":
+    {
+        int limit = args.Length > 3 ? int.Parse(args[3]) : 200;
+        using var an = HeapAnalyzer.OpenDump(args[1]);
+        Console.WriteLine("构建引用索引…");
+        ReferenceIndex idx = ReferenceIndex.Build(an.Heap);
+        Console.WriteLine($"构建 {args[2]} 的持有链合并树（前 {limit} 个实例）…");
+        ReferenceIndex.MergedTreeResult tree = idx.GetMergedRetentionTree(args[2], limit, 2);
+        Console.WriteLine($"覆盖：{tree.LinkedInstances}/{tree.TotalInstances} 个实例找到持有链，共 {tree.TotalPaths} 条路径（每实例最多 2 条）");
+        PrintMergedTree(tree.Root, "", args[2]);
+        return 0;
+    }
+    case "retained":
+    {
+        bool verify = args.Length > 2 && args[2] == "--verify";
+        using var an = HeapAnalyzer.OpenDump(args[1]);
+        Console.WriteLine("构建引用索引…");
+        ReferenceIndex idx = ReferenceIndex.Build(an.Heap);
+        if (verify)
+        {
+            Console.WriteLine("构建引用图并做正确性校验（含小图暴力对拍）…");
+            DominatorAnalysis.Graph g = DominatorAnalysis.Graph.BuildFrom(idx);
+            Console.WriteLine($"图规模: {g.NodeCount:N0} 个节点");
+            IReadOnlyList<string> errors = DominatorAnalysis.Verify(g);
+            Console.WriteLine(errors.Count == 0
+                ? "校验通过：支配树与暴力法一致（或图过大跳过对拍），子树求和不变式全部成立"
+                : "校验失败：");
+            foreach (string e in errors) Console.WriteLine("  ✗ " + e);
+        }
+        var sw = Stopwatch.StartNew();
+        DominatorAnalysis dom = DominatorAnalysis.Run(idx, n => Console.Write($"\r已处理 {n:N0}…"));
+        sw.Stop();
+        Console.WriteLine($"\r支配树完成：可达 {dom.ReachableCount:N0}，死对象 {dom.UnreachableCount:N0}，耗时 {sw.Elapsed.TotalSeconds:0.0}s");
+        Console.WriteLine($"\n{"类型",-60} {"Retained",14}");
+        foreach (RetainedInfo r in dom.GetRetainedByType().Take(25))
+            Console.WriteLine($"{Trunc(r.Name, 60),-60} {FormatBytes(r.RetainedSize),14}");
+        return 0;
+    }
     case "diff":
     {
         using var a = HeapAnalyzer.OpenDump(args[1]);
@@ -128,6 +191,20 @@ switch (args[0])
     default:
         Console.WriteLine($"未知命令: {args[0]}");
         return 1;
+}
+
+static void PrintMergedTree(MergedChainNode node, string indent, string targetType, int maxChildren = 12)
+{
+    string via = node.Field != null ? $"（经 .{Trunc(node.Field, 24)} 持有）" : "";
+    string label = node.TypeName == "GC 根"
+        ? "GC 根"
+        : $"{Trunc(node.TypeName, 64)}{via}  —  经此持有 {node.TargetCount} 个目标实例（本层 {node.ObjectCount} 个对象, {FormatBytes(node.TotalSize)}）";
+    Console.WriteLine($"{indent}{label}");
+    if (indent.Length / 2 > 20) { Console.WriteLine($"{indent}  …（层级过深已截断）"); return; }
+    for (int i = 0; i < Math.Min(node.Children.Count, maxChildren); i++)
+        PrintMergedTree(node.Children[i], indent + "  ", targetType);
+    if (node.Children.Count > maxChildren)
+        Console.WriteLine($"{indent}  … 其余 {node.Children.Count - maxChildren} 个分支未显示");
 }
 
 static string FormatBytes(long b)

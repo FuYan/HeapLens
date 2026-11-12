@@ -152,6 +152,7 @@
                             <DataGridTextColumn Header="类型" Binding="{Binding Name}" Width="460"/>
                             <DataGridTextColumn Header="数量" Binding="{Binding Count, StringFormat={}{0:N0}}" Width="100"/>
                             <DataGridTextColumn Header="总大小" Binding="{Binding TotalSize, Converter={StaticResource Bytes}}" Width="110"/>
+                            <DataGridTextColumn Header="保留大小" Binding="{Binding RetainedSize, Converter={StaticResource Bytes}}" Width="110"/>
                             <DataGridTextColumn Header="平均大小" Binding="{Binding AvgSize, Converter={StaticResource Bytes}}" Width="100"/>
                             <DataGridTextColumn Header="最大" Binding="{Binding MaxSize, Converter={StaticResource Bytes}}" Width="100"/>
                             <DataGridTextColumn Header="Gen0" Binding="{Binding Gen0Count, StringFormat={}{0:N0}}" Width="80"/>
@@ -240,7 +241,8 @@
                                       MouseDoubleClick="ChainTypesGrid_OnMouseDoubleClick" FontSize="11">
                                 <DataGrid.Columns>
                                     <DataGridTextColumn Header="类型" Binding="{Binding Name}" Width="*"/>
-                                    <DataGridTextColumn Header="数量" Binding="{Binding Count, StringFormat={}{0:N0}}" Width="70"/>
+                                    <DataGridTextColumn Header="数量" Binding="{Binding Count, StringFormat={}{0:N0}}" Width="60"/>
+                                    <DataGridTextColumn Header="保留大小" Binding="{Binding RetainedSize, Converter={StaticResource Bytes}}" Width="80"/>
                                 </DataGrid.Columns>
                             </DataGrid>
                             <DataGrid Grid.Row="2" ItemsSource="{Binding ChainInstances}"
@@ -270,28 +272,53 @@
                                 <ColumnDefinition Width="*"/>
                             </Grid.ColumnDefinitions>
 
-                            <!-- 引用树：GC 根 → 下级引用，可逐层展开 -->
-                            <Border Grid.Column="0" Style="{StaticResource Panel}">
-                                <DockPanel>
-                                    <TextBlock DockPanel.Dock="Top" Text="GC 根引用树（点击节点查看调用链，展开节点浏览下级引用）"
-                                               FontSize="11" Foreground="{StaticResource TextSecondaryBrush}" Margin="0,0,0,6" TextWrapping="Wrap"/>
-                                    <TreeView ItemsSource="{Binding ChainRoots}" Padding="2"
-                                              BorderThickness="0" Background="Transparent"
-                                              SelectedItemChanged="ChainTree_OnSelectedItemChanged">
-                                        <TreeView.ItemContainerStyle>
-                                            <Style TargetType="TreeViewItem">
-                                                <EventSetter Event="TreeViewItem.Expanded" Handler="ChainTreeItem_OnExpanded"/>
-                                                <Setter Property="Padding" Value="2,1"/>
-                                            </Style>
-                                        </TreeView.ItemContainerStyle>
-                                        <TreeView.ItemTemplate>
-                                            <HierarchicalDataTemplate ItemsSource="{Binding Children}">
-                                                <TextBlock Text="{Binding Title}" FontSize="11.5" ToolTip="{Binding Title}"/>
-                                            </HierarchicalDataTemplate>
-                                        </TreeView.ItemTemplate>
-                                    </TreeView>
-                                </DockPanel>
-                            </Border>
+                            <!-- 引用树 / 类型持有链（合并）双页签 -->
+                            <TabControl Grid.Column="0" BorderThickness="0" Background="Transparent" Padding="0">
+                                <TabItem Header="GC 根引用树">
+                                    <Border Style="{StaticResource Panel}">
+                                        <DockPanel>
+                                            <TextBlock DockPanel.Dock="Top" Text="GC 根引用树（点击节点查看调用链，展开节点浏览下级引用）"
+                                                       FontSize="11" Foreground="{StaticResource TextSecondaryBrush}" Margin="0,0,0,6" TextWrapping="Wrap"/>
+                                            <TreeView ItemsSource="{Binding ChainRoots}" Padding="2"
+                                                      BorderThickness="0" Background="Transparent"
+                                                      SelectedItemChanged="ChainTree_OnSelectedItemChanged">
+                                                <TreeView.ItemContainerStyle>
+                                                    <Style TargetType="TreeViewItem">
+                                                        <EventSetter Event="TreeViewItem.Expanded" Handler="ChainTreeItem_OnExpanded"/>
+                                                        <Setter Property="Padding" Value="2,1"/>
+                                                    </Style>
+                                                </TreeView.ItemContainerStyle>
+                                                <TreeView.ItemTemplate>
+                                                    <HierarchicalDataTemplate ItemsSource="{Binding Children}">
+                                                        <TextBlock Text="{Binding Title}" FontSize="11.5" ToolTip="{Binding Title}"/>
+                                                    </HierarchicalDataTemplate>
+                                                </TreeView.ItemTemplate>
+                                            </TreeView>
+                                        </DockPanel>
+                                    </Border>
+                                </TabItem>
+                                <TabItem Header="类型持有链(合并)">
+                                    <Border Style="{StaticResource Panel}">
+                                        <DockPanel>
+                                            <TextBlock DockPanel.Dock="Top" Text="{Binding MergedChainTitle}"
+                                                       FontSize="11" Foreground="{StaticResource TextSecondaryBrush}" Margin="0,0,0,6" TextWrapping="Wrap"/>
+                                            <TreeView ItemsSource="{Binding MergedChainRoots}" Padding="2"
+                                                      BorderThickness="0" Background="Transparent">
+                                                <TreeView.ItemContainerStyle>
+                                                    <Style TargetType="TreeViewItem">
+                                                        <Setter Property="Padding" Value="2,1"/>
+                                                    </Style>
+                                                </TreeView.ItemContainerStyle>
+                                                <TreeView.ItemTemplate>
+                                                    <HierarchicalDataTemplate ItemsSource="{Binding Children}">
+                                                        <TextBlock Text="{Binding Title}" FontSize="11.5" ToolTip="{Binding Title}"/>
+                                                    </HierarchicalDataTemplate>
+                                                </TreeView.ItemTemplate>
+                                            </TreeView>
+                                        </DockPanel>
+                                    </Border>
+                                </TabItem>
+                            </TabControl>
 
                             <!-- 调用链详情：保留路径 + 直接引用者 -->
                             <Border Grid.Column="2" Style="{StaticResource Panel}">

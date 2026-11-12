@@ -53,8 +53,9 @@ public sealed class MainViewModel : INotifyPropertyChanged
     private string _retentionTitle = "选择左侧实例查看保留路径";
     public string RetentionTitle { get => _retentionTitle; set => Set(ref _retentionTitle, value); }
 
-    // ---- 调用链（引用树） ----
+    // ---- 调用链（引用树 / 类型持有链） ----
     public ObservableCollection<ChainTreeNode> ChainRoots { get; } = new();
+    public ObservableCollection<ChainTreeNode> MergedChainRoots { get; } = new();
     public ObservableCollection<InstanceInfo> ChainInstances { get; } = new();
     private InstanceInfo? _chainSelectedInstance;
     public InstanceInfo? ChainSelectedInstance { get => _chainSelectedInstance; set { if (Set(ref _chainSelectedInstance, value)) { if (value != null) ShowChainForAddress(value.Address); } } }
@@ -62,6 +63,8 @@ public sealed class MainViewModel : INotifyPropertyChanged
     public ObservableCollection<ReferenceIndex.ReferrerInfo> ChainReferrers { get; } = new();
     private string _chainTitle = "加载 dump 后：双击左侧类型 → 双击实例，或点击/展开右侧引用树节点，即时查看完整调用链";
     public string ChainTitle { get => _chainTitle; set => Set(ref _chainTitle, value); }
+    private string _mergedChainTitle = "双击左侧类型，穿透显示该类型所有实例的持有链（合并树，对标 dotMemory）";
+    public string MergedChainTitle { get => _mergedChainTitle; set => Set(ref _mergedChainTitle, value); }
 
     // ---- 快照对比 ----
     private string _diffPathA = "";
@@ -159,7 +162,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
         Status = $"正在分析 {Path.GetFileName(path)}…";
         try
         {
-            (HeapAnalyzer an, HeapOverview ov, List<TypeStat> types, List<SegmentStat> segs, ReferenceIndex index) =
+            (HeapAnalyzer an, HeapOverview ov, List<TypeStat> types, List<SegmentStat> segs, ReferenceIndex index, DominatorAnalysis dom) =
                 await Task.Run(() =>
                 {
                     var an = HeapAnalyzer.OpenDump(path);
@@ -169,7 +172,10 @@ public sealed class MainViewModel : INotifyPropertyChanged
                     Status = "正在构建引用索引（调用链，大堆约需几十秒）…";
                     var index = ReferenceIndex.Build(an.Heap,
                         n => Status = $"正在构建引用索引…已处理 {n:N0} 个对象");
-                    return (an, ov, types, segs, index);
+                    Status = "正在计算支配树 Retained Size…";
+                    var dom = DominatorAnalysis.Run(index,
+                        n => Status = $"正在计算 Retained Size…{n:N0}");
+                    return (an, ov, types, segs, index, dom);
                 });
 
             // ---- 以下都在 UI 线程 ----
@@ -180,6 +186,11 @@ public sealed class MainViewModel : INotifyPropertyChanged
 
             Overview = ov;
             _allTypes = types;
+            // 应用 Retained Size（支配树保留大小，对标 dotMemory）
+            var retainedMap = new Dictionary<string, long>(StringComparer.Ordinal);
+            foreach (RetainedInfo r in dom.GetRetainedByType()) retainedMap[r.Name] = r.RetainedSize;
+            foreach (TypeStat t in types)
+                if (retainedMap.TryGetValue(t.Name, out long rs)) t.RetainedSize = rs;
             ApplyTypeFilter();
 
             Segments.Clear();
@@ -198,14 +209,17 @@ public sealed class MainViewModel : INotifyPropertyChanged
             ChainInstances.Clear();
             ChainPaths.Clear();
             ChainReferrers.Clear();
+            MergedChainRoots.Clear();
 
             ChainRoots.Clear();
             foreach (ReferenceIndex.RootGroupInfo g in index.GetRootGroups(200))
                 ChainRoots.Add(ChainTreeNode.ForRootGroup(g));
             ChainTitle = $"共 {index.RootCount:N0} 个 GC 根；点击/展开引用树节点或选择实例，即时查看调用链";
+            MergedChainTitle = "双击左侧类型，穿透显示该类型所有实例的持有链（合并树，对标 dotMemory）";
 
             Status = $"已加载 {Path.GetFileName(path)}：{ov.ObjectCount:N0} 个对象，{types.Count} 种类型，" +
-                     $"{index.RootCount:N0} 个 GC 根，{index.EdgeCount:N0} 条引用边（调用链就绪）";
+                     $"{index.RootCount:N0} 个 GC 根，{index.EdgeCount:N0} 条引用边，" +
+                     $"Retained 已就绪（可达 {dom.ReachableCount:N0} / 死对象 {dom.UnreachableCount:N0}）";
         }
         catch (Exception ex)
         {
@@ -265,14 +279,41 @@ public sealed class MainViewModel : INotifyPropertyChanged
 
     // ---------- 调用链（引用树） ----------
 
-    /// <summary>双击类型 → 列出实例（供调用链页快速定位）。</summary>
-    public void LoadChainInstances(TypeStat type)
+    /// <summary>双击类型 → 列出实例并构建该类型所有实例的持有链合并树（对标 dotMemory）。</summary>
+    public async Task LoadChainInstancesAsync(TypeStat type)
     {
         if (_index == null) return;
-        IReadOnlyList<InstanceInfo> insts = _index.GetInstances(type.Name, 500);
-        ChainInstances.Clear();
-        foreach (var i in insts) ChainInstances.Add(i);
-        ChainTitle = $"{type.Name}：{insts.Count} 个实例 —— 选择/双击实例查看完整调用链";
+        MergedChainTitle = $"正在构建 {type.Name} 的持有链合并树…";
+        try
+        {
+            (IReadOnlyList<InstanceInfo> insts, ReferenceIndex.MergedTreeResult tree) = await Task.Run(
+                () => (_index.GetInstances(type.Name, 500), _index.GetMergedRetentionTree(type.Name, 200, 2)));
+
+            ChainInstances.Clear();
+            foreach (var i in insts) ChainInstances.Add(i);
+
+            MergedChainRoots.Clear();
+            MergedChainRoots.Add(ToTreeNode(tree.Root));
+            MergedChainTitle = $"{type.Name}：{tree.LinkedInstances}/{tree.TotalInstances} 个实例、{tree.TotalPaths} 条持有链（按持有者类型+字段合并聚合）";
+            ChainTitle = $"{type.Name}：{insts.Count} 个实例 —— 选择实例查看单条调用链，或查看右侧合并持有链树";
+        }
+        catch (Exception ex) { MergedChainTitle = "构建失败: " + ex.Message; }
+    }
+
+    /// <summary>合并树节点 → 树视图节点（子节点全部预填，无需懒加载）。</summary>
+    private static ChainTreeNode ToTreeNode(MergedChainNode n)
+    {
+        string title = n.TypeName == "GC 根"
+            ? "GC 根"
+            : $"{n.TypeName}{(n.Field != null ? $"（经 .{n.Field} 持有）" : "")}  —  经此持有 {n.TargetCount} 个目标实例 · 本层 {n.ObjectCount} 个对象 · {FormatBytes(n.TotalSize)}";
+        var node = new ChainTreeNode
+        {
+            Kind = ChainNodeKind.Merged,
+            Title = title,
+            Loaded = true,
+        };
+        foreach (MergedChainNode c in n.Children) node.Children.Add(ToTreeNode(c));
+        return node;
     }
 
     /// <summary>即时显示某对象的调用链（保留路径）+ 全部直接引用者。</summary>
@@ -419,7 +460,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
 
 // ---------- 调用链树的视图模型 ----------
 
-public enum ChainNodeKind { RootGroup, Object, Truncated }
+public enum ChainNodeKind { RootGroup, Object, Merged, Truncated }
 
 /// <summary>引用树节点（GC 根分组 / 对象 / 截断占位）。</summary>
 public sealed class ChainTreeNode

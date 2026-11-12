@@ -36,6 +36,12 @@ public sealed class ReferenceIndex
     public long EdgeCount { get; private set; }
     public int RootCount => _roots.Count;
 
+    /// <summary>反向引用表（子对象地址 → 引用者边列表）。供支配树等扩展分析使用。</summary>
+    public IReadOnlyDictionary<ulong, List<ReferrerEdge>> Referrers => _referrers;
+
+    /// <summary>全部 GC 根对象地址。供支配树等扩展分析使用。</summary>
+    public IReadOnlyCollection<ulong> RootAddresses => _roots.Keys;
+
     // ---------- 构建 ----------
 
     /// <summary>一次堆遍历构建索引。大堆几十秒量级，建议后台线程调用并订阅 progress。</summary>
@@ -301,6 +307,91 @@ public sealed class ReferenceIndex
 
     public bool IsRoot(ulong addr) => _roots.ContainsKey(addr);
     public string? GetRootKind(ulong addr) => _roots.TryGetValue(addr, out string? k) ? k : null;
+
+    // ---------- 合并持有链（对标 dotMemory merged retention paths） ----------
+
+    /// <summary>构建期临时节点：按地址去重聚合对象数/大小。</summary>
+    private sealed class MBNode
+    {
+        public string TypeName = "";
+        public string? Field;
+        public readonly HashSet<ulong> TargetAddrs = new();
+        public readonly Dictionary<ulong, long> AddrSizes = new();
+        public readonly List<MBNode> Children = new();
+        public MBNode? FindChild(string type, string? field)
+            => Children.FirstOrDefault(c => c.TypeName == type && c.Field == field);
+    }
+
+    /// <summary>合并持有链树结果：树 + 覆盖统计。</summary>
+    public sealed record MergedTreeResult(MergedChainNode Root, int TotalInstances, int LinkedInstances, int TotalPaths);
+
+    /// <summary>
+    /// 某类型所有实例的持有链合并树（GC 根 → 目标类型）：
+    /// 取该类型前 maxInstances 个实例（按大小降序）各至多 maxPathsPerInstance 条保留路径，
+    /// 按 (持有者类型, 字段) 逐层合并聚合，节点显示经此持有的目标实例数 / 去重对象数 / 大小合计。
+    /// </summary>
+    public MergedTreeResult GetMergedRetentionTree(string typeName, int maxInstances = 200, int maxPathsPerInstance = 2)
+    {
+        var root = new MBNode { TypeName = "GC 根" };
+        IReadOnlyList<InstanceInfo> insts = GetInstances(typeName, maxInstances);
+        int linked = 0, totalPaths = 0;
+        foreach (InstanceInfo inst in insts)
+        {
+            IReadOnlyList<RetentionPath> paths = GetRetentionPaths(inst.Address, maxPathsPerInstance);
+            if (paths.Count > 0) linked++;
+            totalPaths += paths.Count;
+            foreach (RetentionPath path in paths)
+                MergePath(root, path, inst.Address);
+        }
+        AggregateTargets(root);
+        return new MergedTreeResult(Materialize(root), insts.Count, linked, totalPaths);
+    }
+
+    /// <summary>把一条根→目标的保留路径合并进持有链树（按类型名+字段聚合，地址去重）。</summary>
+    private static void MergePath(MBNode root, RetentionPath path, ulong targetAddr)
+    {
+        if (path.Nodes.Count == 0) return;
+        MBNode cur = root;
+        for (int i = 0; i < path.Nodes.Count; i++)
+        {
+            RetentionNode n = path.Nodes[i];
+            string? field = i == 0 ? null : path.Nodes[i - 1].FieldName; // 父节点经由该字段持有本节点
+            MBNode? child = cur.FindChild(n.TypeName, field);
+            if (child == null)
+            {
+                child = new MBNode { TypeName = n.TypeName, Field = field };
+                cur.Children.Add(child);
+            }
+            child.AddrSizes[n.Address] = n.Size;
+            cur = child;
+        }
+        cur.TargetAddrs.Add(targetAddr); // 叶子 = 目标实例
+    }
+
+    /// <summary>后序把子树目标实例并入本节点（TargetCount = 经此节点到达的目标实例数）。</summary>
+    private static void AggregateTargets(MBNode n)
+    {
+        foreach (MBNode c in n.Children)
+        {
+            AggregateTargets(c);
+            n.TargetAddrs.UnionWith(c.TargetAddrs);
+        }
+    }
+
+    private static MergedChainNode Materialize(MBNode n)
+    {
+        var node = new MergedChainNode
+        {
+            TypeName = n.TypeName,
+            Field = n.Field,
+            TargetCount = n.TargetAddrs.Count,
+            ObjectCount = n.AddrSizes.Count,
+            TotalSize = n.AddrSizes.Values.Sum(),
+        };
+        foreach (MBNode c in n.Children) node.Children.Add(Materialize(c));
+        node.Children.Sort((a, b) => b.TargetCount.CompareTo(a.TargetCount));
+        return node;
+    }
 
     // ---------- 内部 ----------
 

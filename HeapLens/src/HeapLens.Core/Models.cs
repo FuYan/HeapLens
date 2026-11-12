@@ -14,6 +14,8 @@ public sealed class TypeStat
     public long PohCount { get; set; }
     public long MaxSize { get; set; }
     public double AvgSize => Count == 0 ? 0 : (double)TotalSize / Count;
+    /// <summary>保留大小合计（支配树 Retained Size，对标 dotMemory Retained bytes）。</summary>
+    public long RetainedSize { get; set; }
 }
 
 /// <summary>堆段（segment）信息。</summary>
@@ -83,6 +85,32 @@ public sealed class InstanceInfo
     public ulong Address { get; set; }
     public long Size { get; set; }
     public string? Preview { get; set; }
+}
+
+/// <summary>
+/// 合并持有链树节点（对标 dotMemory 的 merged retention paths）：
+/// 同一层级上（类型名, 字段）相同的持有者聚合为一个节点。
+/// </summary>
+public sealed class MergedChainNode
+{
+    /// <summary>持有者类型名（叶子层为目标类型）。</summary>
+    public string TypeName { get; set; } = "";
+    /// <summary>经由哪个字段持有下一层（叶子为空）。</summary>
+    public string? Field { get; set; }
+    /// <summary>经此节点持有到的目标实例数。</summary>
+    public int TargetCount { get; set; }
+    /// <summary>该层级聚合的去重对象数。</summary>
+    public int ObjectCount { get; set; }
+    /// <summary>该层级聚合对象的浅大小合计。</summary>
+    public long TotalSize { get; set; }
+    public List<MergedChainNode> Children { get; } = new();
+}
+
+/// <summary>类型级保留大小（支配树 retained size，对标 dotMemory Retained bytes）。</summary>
+public sealed class RetainedInfo
+{
+    public string Name { get; set; } = "";
+    public long RetainedSize { get; set; }
 }
 
 /// <summary>快照 diff 行。</summary>
