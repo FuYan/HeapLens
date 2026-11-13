@@ -40,6 +40,27 @@ public partial class MainWindow : Window
         if (sender is DataGrid { SelectedItem: InstanceInfo inst }) _vm.ShowChainForAddress(inst.Address);
     }
 
+    // ---------- 双击对象数据直接跳转到调用链页 ----------
+
+    /// <summary>双击实例行（对象与保留路径页）→ 跳转调用链页并显示该对象的调用链。</summary>
+    private void InstancesGrid_OnMouseDoubleClick(object sender, MouseButtonEventArgs e)
+    {
+        if (sender is DataGrid { SelectedItem: InstanceInfo inst }) JumpToChain(inst.Address);
+    }
+
+    /// <summary>双击支配对象行 → 跳转调用链页并显示该对象的调用链。</summary>
+    private void DominatorsGrid_OnMouseDoubleClick(object sender, MouseButtonEventArgs e)
+    {
+        if (sender is DataGrid { SelectedItem: DominatorRow row }) JumpToChain(row.Address);
+    }
+
+    /// <summary>显示指定对象的调用链并切换到调用链页。</summary>
+    private void JumpToChain(ulong addr)
+    {
+        _vm.ShowChainForAddress(addr);
+        if (TabControlInstance() is { } tabs) tabs.SelectedIndex = 3; // 调用链页
+    }
+
     /// <summary>树节点首次展开时懒加载下级引用。</summary>
     private void ChainTreeItem_OnExpanded(object sender, RoutedEventArgs e)
     {

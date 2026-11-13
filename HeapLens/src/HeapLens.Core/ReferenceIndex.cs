@@ -7,12 +7,13 @@ namespace HeapLens.Core;
 /// 一次堆遍历建立"对象 ← 引用者"反向索引与 GC 根表，之后任意对象的
 /// 保留路径（GC 根 → … → 对象 的完整调用链）均可即时计算，
 /// 无需逐对象运行耗时的 GCRoot 全堆搜索。
+///
+/// 内存布局（内存优化）：反向引用边存于扁平数组，按"子对象地址 → 入边链"
+/// 链式前向星组织（head/next），字段名驻留（intern）去重——避免旧实现
+/// "每对象一个 List"带来的百万级小对象分配与数倍内存开销。
 /// </summary>
 public sealed class ReferenceIndex
 {
-    /// <summary>一条反向引用边：Parent 通过 Field 引用了本对象。</summary>
-    public readonly record struct ReferrerEdge(ulong Parent, string? Field, bool IsArrayElement);
-
     /// <summary>直接引用者信息（调用链上一层）。</summary>
     public sealed record ReferrerInfo(ulong Parent, string TypeName, long Size, string? Field, bool IsArrayElement);
 
@@ -26,7 +27,20 @@ public sealed class ReferenceIndex
     public sealed record NodeBrief(string TypeName, long Size);
 
     private readonly ClrHeap _heap;
-    private readonly Dictionary<ulong, List<ReferrerEdge>> _referrers = new();
+
+    // ---- 反向引用边：扁平数组 + 链式前向星（子对象地址 → 入边链） ----
+    private readonly Dictionary<ulong, int> _head = new();
+    private ulong[] _edgeParent = new ulong[1 << 12];
+    private int[] _edgeField = new int[1 << 12]; // 字段名驻留下标（FieldNull / FieldArrayElement 为特殊值）
+    private int[] _edgeNext = new int[1 << 12];  // 同一子对象的下一条入边（-1 结束）
+    private int _edgeCount;
+
+    // ---- 字段名驻留表（同名字段只存一份字符串） ----
+    private readonly List<string> _fieldNames = new();
+    private readonly Dictionary<string, int> _fieldIndexOf = new(StringComparer.Ordinal);
+    private const int FieldNull = -1;
+    private const int FieldArrayElement = -2;
+
     private readonly Dictionary<ulong, string> _roots = new();
     private readonly Dictionary<string, List<(ulong Address, long Size)>> _byType = new(StringComparer.Ordinal);
 
@@ -36,11 +50,16 @@ public sealed class ReferenceIndex
     public long EdgeCount { get; private set; }
     public int RootCount => _roots.Count;
 
-    /// <summary>反向引用表（子对象地址 → 引用者边列表）。供支配树等扩展分析使用。</summary>
-    public IReadOnlyDictionary<ulong, List<ReferrerEdge>> Referrers => _referrers;
-
     /// <summary>全部 GC 根对象地址。供支配树等扩展分析使用。</summary>
     public IReadOnlyCollection<ulong> RootAddresses => _roots.Keys;
+
+    /// <summary>枚举全部反向引用边（子对象, 引用者）。供支配树建图使用。</summary>
+    public IEnumerable<(ulong Child, ulong Parent)> EnumerateReferrerEdges()
+    {
+        foreach ((ulong child, int head) in _head)
+            for (int e = head; e != -1; e = _edgeNext[e])
+                yield return (child, _edgeParent[e]);
+    }
 
     // ---------- 构建 ----------
 
@@ -64,15 +83,14 @@ public sealed class ReferenceIndex
                 {
                     ulong child = r.Object.Address;
                     if (child == 0) continue;
-                    if (!idx._referrers.TryGetValue(child, out List<ReferrerEdge>? edges))
-                        idx._referrers[child] = edges = new List<ReferrerEdge>();
-                    edges.Add(new ReferrerEdge(obj.Address, r.IsArrayElement ? "[数组元素]" : r.Field?.Name, r.IsArrayElement));
-                    idx.EdgeCount++;
+                    idx.AddEdge(child, obj.Address, idx.InternField(r.Field?.Name, r.IsArrayElement));
                 }
             }
             if (n % 200_000 == 0) progress?.Invoke(n);
         }
         idx.ObjectCount = n;
+        idx.EdgeCount = idx._edgeCount;
+        idx.TrimEdges();
 
         foreach (IClrRoot root in heap.EnumerateRoots())
         {
@@ -81,6 +99,49 @@ public sealed class ReferenceIndex
                 idx._roots[a] = root.RootKind.ToString();
         }
         return idx;
+    }
+
+    private int InternField(string? field, bool isArrayElement)
+    {
+        if (isArrayElement) return FieldArrayElement;
+        if (field == null) return FieldNull;
+        if (_fieldIndexOf.TryGetValue(field, out int idx)) return idx;
+        idx = _fieldNames.Count;
+        _fieldNames.Add(field);
+        _fieldIndexOf[field] = idx;
+        return idx;
+    }
+
+    private string? FieldNameOf(int fieldIdx) => fieldIdx switch
+    {
+        FieldArrayElement => "[数组元素]",
+        FieldNull => null,
+        _ => _fieldNames[fieldIdx],
+    };
+
+    private void AddEdge(ulong child, ulong parent, int fieldIdx)
+    {
+        if (_edgeCount == _edgeNext.Length)
+        {
+            int cap = _edgeNext.Length * 2;
+            Array.Resize(ref _edgeParent, cap);
+            Array.Resize(ref _edgeField, cap);
+            Array.Resize(ref _edgeNext, cap);
+        }
+        int i = _edgeCount++;
+        _edgeParent[i] = parent;
+        _edgeField[i] = fieldIdx;
+        _edgeNext[i] = _head.TryGetValue(child, out int h) ? h : -1;
+        _head[child] = i;
+    }
+
+    /// <summary>构建完成后裁掉边数组尾部空闲容量。</summary>
+    private void TrimEdges()
+    {
+        if (_edgeCount == _edgeNext.Length) return;
+        Array.Resize(ref _edgeParent, _edgeCount);
+        Array.Resize(ref _edgeField, _edgeCount);
+        Array.Resize(ref _edgeNext, _edgeCount);
     }
 
     // ---------- 调用链（保留路径） ----------
@@ -94,7 +155,7 @@ public sealed class ReferenceIndex
         var paths = new List<RetentionPath>();
         var sigs = new HashSet<string>(StringComparer.Ordinal);
 
-        List<ReferrerEdge>? shortest = BfsShortestChain(target);
+        List<(ulong Parent, int FieldIdx)>? shortest = BfsShortestChain(target);
         if (shortest != null)
         {
             RetentionPath p = BuildPath(target, shortest);
@@ -102,7 +163,7 @@ public sealed class ReferenceIndex
             sigs.Add(Signature(p));
         }
 
-        foreach (List<ReferrerEdge> chain in DfsChains(target, maxPaths * 3))
+        foreach (List<(ulong Parent, int FieldIdx)> chain in DfsChains(target, maxPaths * 3))
         {
             RetentionPath p = BuildPath(target, chain);
             if (sigs.Add(Signature(p))) paths.Add(p);
@@ -114,11 +175,11 @@ public sealed class ReferenceIndex
     }
 
     /// <summary>BFS 求最短保留链。返回"根侧在前"的边列表；未找到返回 null。</summary>
-    private List<ReferrerEdge>? BfsShortestChain(ulong target)
+    private List<(ulong Parent, int FieldIdx)>? BfsShortestChain(ulong target)
     {
-        if (_roots.ContainsKey(target)) return new List<ReferrerEdge>();
+        if (_roots.ContainsKey(target)) return new List<(ulong, int)>();
 
-        var came = new Dictionary<ulong, (ulong Child, ReferrerEdge Edge)>();
+        var came = new Dictionary<ulong, (ulong Child, ulong Parent, int FieldIdx)>();
         var visited = new HashSet<ulong> { target };
         var queue = new Queue<ulong>();
         queue.Enqueue(target);
@@ -131,56 +192,58 @@ public sealed class ReferenceIndex
             ulong cur = queue.Dequeue();
             states++;
             if (_roots.ContainsKey(cur)) { found = cur; break; }
-            if (!_referrers.TryGetValue(cur, out List<ReferrerEdge>? edges)) continue;
-            foreach (ReferrerEdge e in edges)
+            if (!_head.TryGetValue(cur, out int e)) continue;
+            for (; e != -1; e = _edgeNext[e])
             {
-                if (visited.Add(e.Parent))
+                ulong parent = _edgeParent[e];
+                if (visited.Add(parent))
                 {
-                    came[e.Parent] = (cur, e);
-                    queue.Enqueue(e.Parent);
+                    came[parent] = (cur, parent, _edgeField[e]);
+                    queue.Enqueue(parent);
                 }
             }
         }
         if (found == null) return null;
 
-        var chain = new List<ReferrerEdge>();
+        var chain = new List<(ulong, int)>();
         ulong node = found.Value;
         while (node != target)
         {
-            (ulong child, ReferrerEdge edge) = came[node];
-            chain.Add(edge); // 根侧在前
+            (ulong child, ulong parent, int fieldIdx) = came[node];
+            chain.Add((parent, fieldIdx)); // 根侧在前
             node = child;
         }
         return chain;
     }
 
     /// <summary>DFS 枚举备选保留链（目标向上，带深度/状态上限），"根侧在前"返回。</summary>
-    private IEnumerable<List<ReferrerEdge>> DfsChains(ulong target, int maxResults, int maxDepth = 64, int maxStates = 200_000)
+    private IEnumerable<List<(ulong Parent, int FieldIdx)>> DfsChains(ulong target, int maxResults, int maxDepth = 64, int maxStates = 200_000)
     {
-        var results = new List<List<ReferrerEdge>>();
+        var results = new List<List<(ulong, int)>>();
         int states = 0;
         var onPath = new HashSet<ulong> { target };
-        var stack = new List<ReferrerEdge>(); // 目标侧在前
+        var stack = new List<(ulong, int)>(); // 目标侧在前
 
         void Dfs(ulong cur)
         {
             if (results.Count >= maxResults || states > maxStates || stack.Count >= maxDepth) return;
             if (cur != target && _roots.ContainsKey(cur))
             {
-                var chain = new List<ReferrerEdge>(stack);
+                var chain = new List<(ulong, int)>(stack);
                 chain.Reverse(); // 根侧在前
                 results.Add(chain);
                 return;
             }
-            if (!_referrers.TryGetValue(cur, out List<ReferrerEdge>? edges)) return;
-            foreach (ReferrerEdge e in edges)
+            if (!_head.TryGetValue(cur, out int e)) return;
+            for (; e != -1; e = _edgeNext[e])
             {
                 states++;
-                if (!onPath.Add(e.Parent)) continue;
-                stack.Add(e);
-                Dfs(e.Parent);
+                ulong parent = _edgeParent[e];
+                if (!onPath.Add(parent)) continue;
+                stack.Add((parent, _edgeField[e]));
+                Dfs(parent);
                 stack.RemoveAt(stack.Count - 1);
-                onPath.Remove(e.Parent);
+                onPath.Remove(parent);
                 if (results.Count >= maxResults || states > maxStates) return;
             }
         }
@@ -190,7 +253,7 @@ public sealed class ReferenceIndex
     }
 
     /// <summary>把"根侧在前"的边链组装为 RetentionPath（节点根 → 目标）。</summary>
-    private RetentionPath BuildPath(ulong target, List<ReferrerEdge> chain)
+    private RetentionPath BuildPath(ulong target, List<(ulong Parent, int FieldIdx)> chain)
     {
         int k = chain.Count;
         var path = new RetentionPath
@@ -198,8 +261,8 @@ public sealed class ReferenceIndex
             RootKind = k > 0 && _roots.TryGetValue(chain[0].Parent, out string? kind) ? kind : (k == 0 ? "自身即根" : "—"),
         };
         for (int i = 0; i < k; i++)
-            path.Nodes.Add(MakeNode(chain[i].Parent, i > 0 ? chain[i - 1].Field : null));
-        path.Nodes.Add(MakeNode(target, k > 0 ? chain[k - 1].Field : null));
+            path.Nodes.Add(MakeNode(chain[i].Parent, i > 0 ? FieldNameOf(chain[i - 1].FieldIdx) : null));
+        path.Nodes.Add(MakeNode(target, k > 0 ? FieldNameOf(chain[k - 1].FieldIdx) : null));
         return path;
     }
 
@@ -262,13 +325,15 @@ public sealed class ReferenceIndex
     /// <summary>对象的全部直接引用者（调用链上一层的所有候选）。</summary>
     public IReadOnlyList<ReferrerInfo> GetReferrerInfos(ulong addr)
     {
-        if (!_referrers.TryGetValue(addr, out List<ReferrerEdge>? edges)) return Array.Empty<ReferrerInfo>();
-        var list = new List<ReferrerInfo>(edges.Count);
-        foreach (ReferrerEdge e in edges)
+        if (!_head.TryGetValue(addr, out int e)) return Array.Empty<ReferrerInfo>();
+        var list = new List<ReferrerInfo>();
+        for (; e != -1; e = _edgeNext[e])
         {
-            ClrObject obj = _heap.GetObject(e.Parent);
+            ulong parent = _edgeParent[e];
+            ClrObject obj = _heap.GetObject(parent);
             bool ok = obj.IsValid;
-            list.Add(new ReferrerInfo(e.Parent, ok ? GetTypeName(obj) : "<unknown>", ok ? (long)obj.Size : 0, e.Field, e.IsArrayElement));
+            list.Add(new ReferrerInfo(parent, ok ? GetTypeName(obj) : "<unknown>", ok ? (long)obj.Size : 0,
+                FieldNameOf(_edgeField[e]), _edgeField[e] == FieldArrayElement));
         }
         list.Sort((a, b) => b.Size.CompareTo(a.Size));
         return list;

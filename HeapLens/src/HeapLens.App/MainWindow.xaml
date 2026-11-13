@@ -176,7 +176,8 @@
                     <DockPanel Grid.Column="0" Margin="0,0,12,0">
                         <TextBlock DockPanel.Dock="Top" Text="{Binding SelectedType.Name, StringFormat='{}{0} 的实例（按大小降序）'}"
                                    FontWeight="SemiBold" Foreground="{StaticResource TextPrimaryBrush}" Margin="0,0,0,8"/>
-                        <DataGrid ItemsSource="{Binding Instances}" SelectedItem="{Binding SelectedInstance}">
+                        <DataGrid x:Name="InstancesGrid" ItemsSource="{Binding Instances}" SelectedItem="{Binding SelectedInstance}"
+                                  MouseDoubleClick="InstancesGrid_OnMouseDoubleClick">
                             <DataGrid.Columns>
                                 <DataGridTextColumn Header="地址" Binding="{Binding Address, Converter={StaticResource Hex}}" Width="130"/>
                                 <DataGridTextColumn Header="大小" Binding="{Binding Size, Converter={StaticResource Bytes}}" Width="80"/>
@@ -199,8 +200,21 @@
                                                     <Border Background="{StaticResource AccentLightBrush}" CornerRadius="3" Padding="6,2">
                                                         <TextBlock Text="{Binding TypeName}" Foreground="{StaticResource AccentBrush}" FontSize="12" FontWeight="SemiBold"/>
                                                     </Border>
-                                                    <TextBlock Text="{Binding FieldName, StringFormat='.{}{0}'}" Margin="8,0,0,0" VerticalAlignment="Center"
-                                                               Foreground="#DB2777" FontWeight="SemiBold" FontSize="12"/>
+                                                    <TextBlock Margin="8,0,0,0" VerticalAlignment="Center"
+                                                               Foreground="#DB2777" FontWeight="SemiBold" FontSize="12"
+                                                               ToolTip="引用方向：下方对象（引用者）经此字段持有/引用本对象">
+                                                        <TextBlock.Style>
+                                                            <Style TargetType="TextBlock">
+                                                                <Setter Property="Visibility" Value="Visible"/>
+                                                                <Style.Triggers>
+                                                                    <DataTrigger Binding="{Binding FieldName}" Value="{x:Null}">
+                                                                        <Setter Property="Visibility" Value="Collapsed"/>
+                                                                    </DataTrigger>
+                                                                </Style.Triggers>
+                                                            </Style>
+                                                        </TextBlock.Style>
+                                                        <Run Text="⬆"/><Run Text="{Binding FieldName, StringFormat=.{}{0}}"/>
+                                                    </TextBlock>
                                                 </StackPanel>
                                                 <StackPanel Orientation="Horizontal" Margin="0,4,0,0">
                                                     <TextBlock Text="{Binding Address, Converter={StaticResource Hex}}" Foreground="{StaticResource TextSecondaryBrush}" FontSize="11" Width="120"/>
@@ -329,7 +343,7 @@
                             <!-- 调用链详情：保留路径 + 直接引用者 -->
                             <Border Grid.Column="2" Style="{StaticResource Panel}">
                                 <DockPanel>
-                                    <TextBlock DockPanel.Dock="Top" Text="调用链（GC 根 → 对象 的保留路径，即时计算）"
+                                    <TextBlock DockPanel.Dock="Top" Text="调用链（目标 → GC 根 的保留路径，即时计算；自上而下为被持有方，⬆ = 被下方对象经该字段引用）"
                                                FontSize="11" Foreground="{StaticResource TextSecondaryBrush}" Margin="0,0,0,6"/>
                                     <ScrollViewer VerticalScrollBarVisibility="Auto">
                                         <StackPanel>
@@ -397,7 +411,7 @@
                     <Border DockPanel.Dock="Top" Padding="0,0,0,10">
                         <TextBlock Text="{Binding DominatorsTitle}" Foreground="{StaticResource TextSecondaryBrush}" TextWrapping="Wrap"/>
                     </Border>
-                    <DataGrid ItemsSource="{Binding Dominators}">
+                    <DataGrid ItemsSource="{Binding Dominators}" MouseDoubleClick="DominatorsGrid_OnMouseDoubleClick">
                         <DataGrid.Columns>
                             <DataGridTextColumn Header="地址" Binding="{Binding Address, Converter={StaticResource Hex}}" Width="130"/>
                             <DataGridTextColumn Header="类型" Binding="{Binding TypeName}" Width="*"/>

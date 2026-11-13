@@ -162,6 +162,7 @@ switch (args[0])
         using var an = HeapAnalyzer.OpenDump(args[1]);
         Console.WriteLine("构建引用索引…");
         ReferenceIndex idx = ReferenceIndex.Build(an.Heap);
+        Console.WriteLine($"索引完成：{idx.ObjectCount:N0} 对象 / {idx.EdgeCount:N0} 边   {MemInfo()}");
         if (verify)
         {
             Console.WriteLine("构建引用图并做正确性校验（含小图暴力对拍）…");
@@ -180,6 +181,7 @@ switch (args[0])
         Console.WriteLine($"\n{"类型",-60} {"Retained",14}");
         foreach (RetainedInfo r in dom.GetRetainedByType().Take(25))
             Console.WriteLine($"{Trunc(r.Name, 60),-60} {FormatBytes(r.RetainedSize),14}");
+        Console.WriteLine($"[{MemInfo()}]");
         return 0;
     }
     case "dominators":
@@ -246,3 +248,10 @@ static string FormatBytes(long b)
 }
 
 static string Trunc(string s, int max) => s.Length <= max ? s : s[..(max - 1)] + "…";
+
+/// <summary>内存快照：托管堆 + 当前/峰值工作集（内存回归对比用）。</summary>
+static string MemInfo()
+{
+    using var p = Process.GetCurrentProcess();
+    return $"托管堆 {GC.GetTotalMemory(false) / 1048576.0:N0} MB, 工作集 {p.WorkingSet64 / 1048576.0:N0} MB, 峰值工作集 {p.PeakWorkingSet64 / 1048576.0:N0} MB";
+}

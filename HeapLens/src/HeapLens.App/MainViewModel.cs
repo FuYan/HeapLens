@@ -390,8 +390,10 @@ public sealed class MainViewModel : INotifyPropertyChanged
                 return;
             }
             FillRetained(paths[0].Nodes);
-            foreach (RetentionNode n in paths[0].Nodes) RetentionNodes.Add(n);
-            RetentionTitle = $"调用链（最短保留路径）：GC 根（{paths[0].RootKind}） → 目标，共 {paths[0].Nodes.Count} 层" +
+            // 倒序显示：目标对象在最上层，GC 根在最下层（与 dotMemory 阅读习惯一致，自上而下逐层被持有）
+            for (int i = paths[0].Nodes.Count - 1; i >= 0; i--)
+                RetentionNodes.Add(paths[0].Nodes[i]);
+            RetentionTitle = $"调用链（最短保留路径，目标 → GC 根）：共 {paths[0].Nodes.Count} 层，根类型 {paths[0].RootKind}（⬆ = 被下方对象经该字段引用）" +
                              (paths.Count > 1 ? $"；另有 {paths.Count - 1} 条备选路径（见「调用链」页）" : "");
         }
         catch (Exception ex) { RetentionTitle = "分析失败: " + ex.Message; }
@@ -646,8 +648,10 @@ public sealed class ChainPathVm
 {
     public ChainPathVm(int index, RetentionPath path)
     {
-        Title = $"路径 {index}：GC 根（{path.RootKind}） → 目标，共 {path.Nodes.Count} 层";
-        foreach (var n in path.Nodes) Nodes.Add(n);
+        Title = $"路径 {index}：目标 → GC 根（{path.RootKind}），共 {path.Nodes.Count} 层（⬆ = 被下方对象经该字段引用）";
+        // 倒序显示：目标对象在最上层，GC 根在最下层
+        for (int i = path.Nodes.Count - 1; i >= 0; i--)
+            Nodes.Add(path.Nodes[i]);
     }
     public string Title { get; }
     public ObservableCollection<RetentionNode> Nodes { get; } = new();

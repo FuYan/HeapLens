@@ -246,15 +246,7 @@ public sealed class DominatorAnalysis
         Array.Fill(parent, -1);
         Array.Fill(ancestor, -1);
 
-        // predecessor（只保留可达边）
-        List<int>[] preds = new List<int>[n];
-        for (int i = 0; i < n; i++) preds[i] = new List<int>();
-        for (int v = 0; v < n; v++)
-        {
-            if (v == g.Root || !reachable[v]) continue;
-            foreach (int p in g.Preds(v))
-                if (reachable[p]) preds[v].Add(p);
-        }
+        // 前驱不在这里做副本：逆序阶段直接遍历 g.Preds(w) 并跳过不可达前驱
 
         // DFS 编号（显式栈，避免深链递归）
         int counter = 0;
@@ -274,23 +266,25 @@ public sealed class DominatorAnalysis
         }
         int dfsCount = counter;
 
-        List<int>[] bucket = new List<int>[n];
-        for (int i = 0; i < n; i++) bucket[i] = new List<int>();
+        // bucket：链式前向星（bucketHead[b] → bucketNext 链），避免 List<int>[n] 百万级小对象
+        int[] bucketHead = new int[n], bucketNext = new int[n];
+        Array.Fill(bucketHead, -1);
 
-        // Eval/Compress（迭代式路径压缩）
+        // Eval/Compress（迭代式路径压缩，路径缓冲复用避免每次调用分配）
+        var evalPath = new List<int>();
         int Eval(int v)
         {
             if (ancestor[v] == -1) return label[v];
-            var path = new List<int>();
+            evalPath.Clear();
             int u = v;
             while (ancestor[u] != -1 && ancestor[ancestor[u]] != -1)
             {
-                path.Add(u);
+                evalPath.Add(u);
                 u = ancestor[u];
             }
-            for (int i = path.Count - 1; i >= 0; i--)
+            for (int i = evalPath.Count - 1; i >= 0; i--)
             {
-                int x = path[i];
+                int x = evalPath[i];
                 int a = ancestor[x];
                 if (semi[label[a]] < semi[label[x]]) label[x] = label[a];
                 ancestor[x] = ancestor[a];
@@ -302,21 +296,24 @@ public sealed class DominatorAnalysis
         for (int i = dfsCount - 1; i >= 1; i--)
         {
             int w = vertex[i];
-            foreach (int v in preds[w])
+            foreach (int v in g.Preds(w))
             {
+                if (!reachable[v]) continue;
                 int u = Eval(v);
                 if (semi[u] < semi[w]) semi[w] = semi[u];
             }
-            bucket[vertex[semi[w]]].Add(w);
+            int b = vertex[semi[w]];
+            bucketNext[w] = bucketHead[b];
+            bucketHead[b] = w;
             if (parent[w] != -1)
             {
                 ancestor[w] = parent[w];
-                foreach (int v in bucket[parent[w]])
+                for (int v = bucketHead[parent[w]]; v != -1; v = bucketNext[v])
                 {
                     int u = Eval(v);
                     idom[v] = semi[u] < semi[v] ? u : parent[w];
                 }
-                bucket[parent[w]].Clear();
+                bucketHead[parent[w]] = -1;
             }
         }
         for (int i = 1; i < dfsCount; i++)
@@ -330,18 +327,80 @@ public sealed class DominatorAnalysis
 
     // ================= 图结构 =================
 
-    /// <summary>引用图（地址 ↔ 下标），含虚拟根。供支配树分析与验证复用。</summary>
+    /// <summary>
+    /// 引用图（地址 ↔ 下标），含虚拟根。供支配树分析与验证复用。
+    /// 边采用链式前向星扁平数组（每条边 succ/pred 各一个 int 槽位），
+    /// 避免百万级 List 小对象分配带来的内存开销。
+    /// </summary>
     public sealed class Graph
     {
         public int Root;                       // 虚拟根下标
         public int NodeCount;
         public ulong[] Addresses = Array.Empty<ulong>();
         public long[] ShallowSizes = Array.Empty<long>();
-        private List<int>[] _succ = Array.Empty<List<int>>();
-        private List<int>[] _preds = Array.Empty<List<int>>();
 
-        public IReadOnlyList<int> Succ(int u) => _succ[u];
-        public IReadOnlyList<int> Preds(int u) => _preds[u];
+        // 出边链：_succHead[u] 起，沿 _succNext 走到 -1
+        private int[] _succHead = Array.Empty<int>();
+        private int[] _succNext = Array.Empty<int>();
+        private int[] _succTo = Array.Empty<int>();
+        private int _succCount;
+
+        // 入边链：_predHead[u] 起，沿 _predNext 走到 -1
+        private int[] _predHead = Array.Empty<int>();
+        private int[] _predNext = Array.Empty<int>();
+        private int[] _predFrom = Array.Empty<int>();
+        private int _predCount;
+
+        public IEnumerable<int> Succ(int u)
+        {
+            for (int e = _succHead[u]; e != -1; e = _succNext[e])
+                yield return _succTo[e];
+        }
+
+        public IEnumerable<int> Preds(int u)
+        {
+            for (int e = _predHead[u]; e != -1; e = _predNext[e])
+                yield return _predFrom[e];
+        }
+
+        /// <summary>预留边容量（边数上限，不足时自动倍增扩容）。</summary>
+        private void AllocEdges(int edgeCapacity)
+        {
+            _succHead = new int[NodeCount];
+            _predHead = new int[NodeCount];
+            Array.Fill(_succHead, -1);
+            Array.Fill(_predHead, -1);
+            int cap = Math.Max(edgeCapacity, 16);
+            _succNext = new int[cap];
+            _succTo = new int[cap];
+            _predNext = new int[cap];
+            _predFrom = new int[cap];
+        }
+
+        private void AddEdge(int from, int to)
+        {
+            if (_succCount == _succNext.Length)
+            {
+                int cap = Math.Max(_succNext.Length * 2, 16);
+                Array.Resize(ref _succNext, cap);
+                Array.Resize(ref _succTo, cap);
+            }
+            int s = _succCount++;
+            _succNext[s] = _succHead[from];
+            _succTo[s] = to;
+            _succHead[from] = s;
+
+            if (_predCount == _predNext.Length)
+            {
+                int cap = Math.Max(_predNext.Length * 2, 16);
+                Array.Resize(ref _predNext, cap);
+                Array.Resize(ref _predFrom, cap);
+            }
+            int p = _predCount++;
+            _predNext[p] = _predHead[to];
+            _predFrom[p] = from;
+            _predHead[to] = p;
+        }
 
         /// <summary>按显式边构造图（测试/验证用）。虚拟根浅大小恒为 0。</summary>
         public static Graph FromEdges(int nodeCount, int root, long[] shallow, IEnumerable<(int From, int To)> edges)
@@ -349,14 +408,9 @@ public sealed class DominatorAnalysis
             shallow[root] = 0; // 虚拟根不是真实对象
             var g = new Graph { NodeCount = nodeCount, Root = root, ShallowSizes = shallow, Addresses = new ulong[nodeCount] };
             for (int i = 0; i < nodeCount; i++) g.Addresses[i] = (ulong)i;
-            g._succ = new List<int>[nodeCount];
-            g._preds = new List<int>[nodeCount];
-            for (int k = 0; k < nodeCount; k++) { g._succ[k] = new List<int>(); g._preds[k] = new List<int>(); }
+            g.AllocEdges(nodeCount * 2);
             foreach ((int from, int to) in edges)
-            {
-                g._succ[from].Add(to);
-                g._preds[to].Add(from);
-            }
+                g.AddEdge(from, to);
             return g;
         }
 
@@ -365,10 +419,10 @@ public sealed class DominatorAnalysis
         {
             var addrSet = new HashSet<ulong>();
             foreach (ulong r in index.RootAddresses) addrSet.Add(r);
-            foreach ((ulong child, List<ReferenceIndex.ReferrerEdge> edges) in index.Referrers)
+            foreach ((ulong child, ulong parent) in index.EnumerateReferrerEdges())
             {
                 addrSet.Add(child);
-                foreach (ReferenceIndex.ReferrerEdge e in edges) addrSet.Add(e.Parent);
+                addrSet.Add(parent);
             }
 
             var g = new Graph { NodeCount = addrSet.Count + 1 };
@@ -384,25 +438,12 @@ public sealed class DominatorAnalysis
                 g.ShallowSizes[i] = index.GetBrief(a).Size;
                 i++;
             }
-            g._succ = new List<int>[g.NodeCount];
-            g._preds = new List<int>[g.NodeCount];
-            for (int k = 0; k < g.NodeCount; k++)
-            {
-                g._succ[k] = new List<int>();
-                g._preds[k] = new List<int>();
-            }
-
-            void AddEdge(int from, int to)
-            {
-                g._succ[from].Add(to);
-                g._preds[to].Add(from);
-            }
+            g.AllocEdges(index.RootCount + (int)Math.Min(index.EdgeCount, int.MaxValue - index.RootCount));
 
             foreach (ulong r in index.RootAddresses)
-                AddEdge(g.Root, indexOf[r]);
-            foreach ((ulong child, List<ReferenceIndex.ReferrerEdge> edges) in index.Referrers)
-                foreach (ReferenceIndex.ReferrerEdge e in edges)
-                    AddEdge(indexOf[e.Parent], indexOf[child]);
+                g.AddEdge(g.Root, indexOf[r]);
+            foreach ((ulong child, ulong parent) in index.EnumerateReferrerEdges())
+                g.AddEdge(indexOf[parent], indexOf[child]);
             return g;
         }
     }
