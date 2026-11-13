@@ -8,12 +8,22 @@ public sealed class BytesConverter : IValueConverter
 {
     public object Convert(object value, Type targetType, object parameter, CultureInfo culture)
     {
-        if (value is not long b) return "";
+        // 兼容 long 与 ulong（SegmentStat.Length/Committed/Reserved 等为 ulong）
+        double b;
+        bool neg = false;
+        switch (value)
+        {
+            case long l: b = l; neg = l < 0; break;
+            case ulong ul: b = ul; break;
+            case int i: b = i; neg = i < 0; break;
+            case uint ui: b = ui; break;
+            default: return "";
+        }
         string[] units = { "B", "KB", "MB", "GB" };
         double v = Math.Abs(b);
         int u = 0;
         while (v >= 1024 && u < units.Length - 1) { v /= 1024; u++; }
-        return $"{(b < 0 ? "-" : "")}{v:0.##} {units[u]}";
+        return $"{(neg ? "-" : "")}{v:0.##} {units[u]}";
     }
 
     public object ConvertBack(object value, Type targetType, object parameter, CultureInfo culture)

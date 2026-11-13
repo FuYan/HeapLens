@@ -166,6 +166,35 @@ public sealed class HeapAnalyzer : IDisposable
         return list;
     }
 
+    /// <summary>
+    /// 字符串搜索（对标 dotMemory Strings 视图）：按字符串内容对 System.String 实例分组，
+    /// keyword 非空时仅保留包含该关键字（忽略大小写）的内容；按组总大小降序返回前 maxGroups 组。
+    /// </summary>
+    public StringSearchResult SearchStrings(string keyword, int maxGroups = 500, int maxScan = 1_000_000)
+    {
+        var result = new StringSearchResult();
+        var map = new Dictionary<string, StringGroup>(StringComparer.Ordinal);
+        foreach (ClrObject obj in Heap.EnumerateObjects())
+        {
+            if (obj.IsFree) continue;
+            if (GetTypeName(obj) != "System.String") continue;
+            if (++result.ScannedCount > maxScan) { result.Truncated = true; break; }
+            string s;
+            try { s = obj.AsString(1024) ?? ""; }
+            catch { continue; }
+            if (keyword.Length > 0 && !s.Contains(keyword, StringComparison.OrdinalIgnoreCase)) continue;
+            result.MatchedCount++;
+            if (!map.TryGetValue(s, out StringGroup? g))
+                map[s] = g = new StringGroup { Value = s.Length > 160 ? s[..160] + "…" : s, Count = 0, TotalSize = 0 };
+            g.Count++;
+            g.TotalSize += (long)obj.Size;
+        }
+        result.Groups.AddRange(map.Values);
+        result.Groups.Sort((a, b) => b.TotalSize.CompareTo(a.TotalSize));
+        if (result.Groups.Count > maxGroups) result.Groups.RemoveRange(maxGroups, result.Groups.Count - maxGroups);
+        return result;
+    }
+
     /// <summary>保留路径分析：目标对象为什么不能被 GC 回收（经哪条引用链挂在 GC 根上）。</summary>
     public RetentionPath? GetRetentionPath(ulong targetAddress, int timeoutMs = 120_000)
     {

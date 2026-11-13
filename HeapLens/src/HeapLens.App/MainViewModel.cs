@@ -2,6 +2,7 @@ using System.Collections.ObjectModel;
 using System.ComponentModel;
 using System.IO;
 using System.Runtime.CompilerServices;
+using System.Text.RegularExpressions;
 using System.Windows;
 using System.Windows.Input;
 using HeapLens.Core;
@@ -16,6 +17,9 @@ public sealed class MainViewModel : INotifyPropertyChanged
 {
     private HeapAnalyzer? _analyzer;
     private ReferenceIndex? _index;
+    private DominatorAnalysis? _dom;
+    /// <summary>调用链计算序号令牌：并发触发时只采纳最后一次结果（Bug 3 修复）。</summary>
+    private int _chainSeq;
 
     public event PropertyChangedEventHandler? PropertyChanged;
 
@@ -41,7 +45,11 @@ public sealed class MainViewModel : INotifyPropertyChanged
     public ObservableCollection<TypeStat> Types { get; } = new();
     private List<TypeStat> _allTypes = new();
     private string _typeFilter = "";
+    /// <summary>类型过滤器：支持子串（默认）、通配符 * ?（如 System.Collections.*）、正则（re: 开头）。</summary>
     public string TypeFilter { get => _typeFilter; set { if (Set(ref _typeFilter, value)) ApplyTypeFilter(); } }
+    private bool _namespaceGrouping;
+    /// <summary>命名空间分组开关：按命名空间聚合类型统计（对标 dotMemory 按命名空间分组）。</summary>
+    public bool NamespaceGrouping { get => _namespaceGrouping; set { if (Set(ref _namespaceGrouping, value)) ApplyTypeFilter(); } }
     private TypeStat? _selectedType;
     public TypeStat? SelectedType { get => _selectedType; set => Set(ref _selectedType, value); }
 
@@ -66,6 +74,18 @@ public sealed class MainViewModel : INotifyPropertyChanged
     private string _mergedChainTitle = "双击左侧类型，穿透显示该类型所有实例的持有链（合并树，对标 dotMemory）";
     public string MergedChainTitle { get => _mergedChainTitle; set => Set(ref _mergedChainTitle, value); }
 
+    // ---- 支配对象（Dominators） ----
+    public ObservableCollection<DominatorRow> Dominators { get; } = new();
+    private string _dominatorsTitle = "加载 dump 后自动计算支配对象（按 Retained Size 降序 Top 500）";
+    public string DominatorsTitle { get => _dominatorsTitle; set => Set(ref _dominatorsTitle, value); }
+
+    // ---- 字符串搜索 ----
+    public ObservableCollection<StringGroup> StringResults { get; } = new();
+    private string _stringSearchKeyword = "";
+    public string StringSearchKeyword { get => _stringSearchKeyword; set => Set(ref _stringSearchKeyword, value); }
+    private string _stringSearchTitle = "输入关键字搜索字符串内容（留空则按总大小列出 Top 组），点击「搜索」执行";
+    public string StringSearchTitle { get => _stringSearchTitle; set => Set(ref _stringSearchTitle, value); }
+
     // ---- 快照对比 ----
     private string _diffPathA = "";
     public string DiffPathA { get => _diffPathA; set => Set(ref _diffPathA, value); }
@@ -81,6 +101,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
     public ICommand OpenDiffBCommand { get; }
     public ICommand RunDiffCommand { get; }
     public ICommand ShowInstancesCommand { get; }
+    public ICommand SearchStringsCommand { get; }
 
     public MainViewModel()
     {
@@ -91,6 +112,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
         OpenDiffBCommand = new RelayCommand(_ => PickDiffPath(isA: false));
         RunDiffCommand = new RelayCommand(async _ => await RunDiffAsync(), _ => CanAct);
         ShowInstancesCommand = new RelayCommand(async p => await ShowInstancesAsync(p as TypeStat), _ => CanAct);
+        SearchStringsCommand = new RelayCommand(async _ => await SearchStringsAsync(), _ => CanAct);
         _ = RefreshProcessesAsync();
     }
 
@@ -162,7 +184,8 @@ public sealed class MainViewModel : INotifyPropertyChanged
         Status = $"正在分析 {Path.GetFileName(path)}…";
         try
         {
-            (HeapAnalyzer an, HeapOverview ov, List<TypeStat> types, List<SegmentStat> segs, ReferenceIndex index, DominatorAnalysis dom) =
+            (HeapAnalyzer an, HeapOverview ov, List<TypeStat> types, List<SegmentStat> segs, ReferenceIndex index, DominatorAnalysis dom,
+                IReadOnlyList<DominatorRow> topDoms) =
                 await Task.Run(() =>
                 {
                     var an = HeapAnalyzer.OpenDump(path);
@@ -175,13 +198,15 @@ public sealed class MainViewModel : INotifyPropertyChanged
                     Status = "正在计算支配树 Retained Size…";
                     var dom = DominatorAnalysis.Run(index,
                         n => Status = $"正在计算 Retained Size…{n:N0}");
-                    return (an, ov, types, segs, index, dom);
+                    var topDoms = dom.GetTopDominators(500);
+                    return (an, ov, types, segs, index, dom, topDoms);
                 });
 
             // ---- 以下都在 UI 线程 ----
             HeapAnalyzer? old = _analyzer;
             _analyzer = an;
             _index = index;
+            _dom = dom;
             old?.Dispose();
 
             Overview = ov;
@@ -210,6 +235,10 @@ public sealed class MainViewModel : INotifyPropertyChanged
             ChainPaths.Clear();
             ChainReferrers.Clear();
             MergedChainRoots.Clear();
+            Dominators.Clear();
+            foreach (DominatorRow d in topDoms) Dominators.Add(d);
+            DominatorsTitle = $"支配对象：按 Retained Size 降序 Top {Dominators.Count:N0}（Retained = 该对象被释放时可回收的内存总量）";
+            StringResults.Clear();
 
             ChainRoots.Clear();
             foreach (ReferenceIndex.RootGroupInfo g in index.GetRootGroups(200))
@@ -234,26 +263,116 @@ public sealed class MainViewModel : INotifyPropertyChanged
     private void ApplyTypeFilter()
     {
         Types.Clear();
-        IEnumerable<TypeStat> q = _allTypes;
-        if (!string.IsNullOrWhiteSpace(TypeFilter))
-            q = q.Where(t => t.Name.Contains(TypeFilter, StringComparison.OrdinalIgnoreCase));
-        foreach (var t in q.Take(2000)) Types.Add(t);
+        IEnumerable<TypeStat> q = _allTypes.Where(t => MatchesFilter(t.Name, TypeFilter));
+        if (NamespaceGrouping)
+        {
+            // 命名空间分组：按命名空间聚合（对标 dotMemory），分组行 IsNamespaceGroup = true
+            var groups = new Dictionary<string, TypeStat>(StringComparer.Ordinal);
+            foreach (TypeStat t in q)
+            {
+                string ns = GetNamespace(t.Name);
+                if (!groups.TryGetValue(ns, out TypeStat? g))
+                    groups[ns] = g = new TypeStat { Name = ns, IsNamespaceGroup = true };
+                g.Count += t.Count;
+                g.TotalSize += t.TotalSize;
+                g.RetainedSize += t.RetainedSize;
+                g.Gen0Count += t.Gen0Count;
+                g.Gen1Count += t.Gen1Count;
+                g.Gen2Count += t.Gen2Count;
+                g.LohCount += t.LohCount;
+                g.PohCount += t.PohCount;
+                if (t.MaxSize > g.MaxSize) g.MaxSize = t.MaxSize;
+            }
+            List<TypeStat> agg = groups.Values.ToList();
+            agg.Sort((a, b) => b.TotalSize.CompareTo(a.TotalSize));
+            foreach (var t in agg.Take(2000)) Types.Add(t);
+        }
+        else
+        {
+            foreach (var t in q.Take(2000)) Types.Add(t);
+        }
+    }
+
+    /// <summary>类型过滤器匹配：默认子串（忽略大小写）；支持通配符 * ?；re: 开头为正则。</summary>
+    private static bool MatchesFilter(string name, string filter)
+    {
+        if (string.IsNullOrWhiteSpace(filter)) return true;
+        try
+        {
+            if (filter.StartsWith("re:", StringComparison.OrdinalIgnoreCase))
+                return Regex.IsMatch(name, filter[3..], RegexOptions.IgnoreCase);
+            if (filter.Contains('*') || filter.Contains('?'))
+            {
+                string pattern = "^" + Regex.Escape(filter).Replace("\\*", ".*").Replace("\\?", ".") + "$";
+                return Regex.IsMatch(name, pattern, RegexOptions.IgnoreCase);
+            }
+        }
+        catch (ArgumentException) { /* 正则非法时退化为子串匹配 */ }
+        return name.Contains(filter, StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>取类型的命名空间（处理泛型参数 / 嵌套类型；无命名空间归为 &lt;global&gt;）。</summary>
+    private static string GetNamespace(string typeName)
+    {
+        string baseName = typeName;
+        int b = baseName.IndexOf('[');
+        if (b >= 0) baseName = baseName[..b];
+        int plus = baseName.IndexOf('+');
+        if (plus >= 0) baseName = baseName[..plus];
+        int dot = baseName.LastIndexOf('.');
+        return dot > 0 ? baseName[..dot] : "<global>";
     }
 
     private async Task ShowInstancesAsync(TypeStat? type)
     {
         if (_analyzer == null || type == null) return;
+        if (type.IsNamespaceGroup) { Status = $"{type.Name} 是命名空间分组行，请关闭分组或筛选到具体类型后查看实例"; return; }
         SelectedType = type;
         try
         {
             IReadOnlyList<InstanceInfo> insts = _index != null
                 ? await Task.Run(() => _index.GetInstances(type.Name, 500))
                 : await Task.Run(() => _analyzer.GetInstances(type.Name, 500));
+            FillRetained(insts);
             Instances.Clear();
             foreach (var i in insts) Instances.Add(i);
             Status = $"{type.Name}：{insts.Count} 个实例（按大小降序）";
         }
         catch (Exception ex) { Status = "出错: " + ex.Message; }
+    }
+
+    /// <summary>用支配树结果填充实例的 Retained Size（单对象 Retained 显示）。</summary>
+    private void FillRetained(IEnumerable<InstanceInfo> insts)
+    {
+        if (_dom == null) return;
+        foreach (InstanceInfo i in insts) i.RetainedSize = _dom.GetRetained(i.Address);
+    }
+
+    /// <summary>用支配树结果填充保留路径节点的 Retained Size。</summary>
+    private void FillRetained(IEnumerable<RetentionNode> nodes)
+    {
+        if (_dom == null) return;
+        foreach (RetentionNode n in nodes) n.RetainedSize = _dom.GetRetained(n.Address);
+    }
+
+    // ---------- 字符串搜索（对标 dotMemory Strings 视图） ----------
+
+    private async Task SearchStringsAsync()
+    {
+        if (_analyzer == null) { StringSearchTitle = "请先加载 dump 文件"; return; }
+        string keyword = StringSearchKeyword ?? "";
+        StringSearchTitle = "正在扫描字符串…";
+        try
+        {
+            StringSearchResult result = await Task.Run(() => _analyzer.SearchStrings(keyword));
+            StringResults.Clear();
+            foreach (StringGroup g in result.Groups) StringResults.Add(g);
+            string tail = result.Truncated ? "，已达扫描上限" : "";
+            StringSearchTitle = keyword.Length > 0
+                ? $"包含「{keyword}」：{result.MatchedCount:N0} 个实例、{result.Groups.Count:N0} 组（扫描 {result.ScannedCount:N0} 个字符串{tail}）"
+                : $"全部字符串：{result.MatchedCount:N0} 个实例、{result.Groups.Count:N0} 组（按总大小降序{tail}）";
+        }
+        catch (Exception ex) { StringSearchTitle = "搜索失败: " + ex.Message; }
     }
 
     private async Task ShowRetentionPathAsync()
@@ -270,6 +389,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
                 RetentionTitle = $"0x{addr:X12}：未找到到 GC 根的引用链（对象可能不可达或搜索超限）";
                 return;
             }
+            FillRetained(paths[0].Nodes);
             foreach (RetentionNode n in paths[0].Nodes) RetentionNodes.Add(n);
             RetentionTitle = $"调用链（最短保留路径）：GC 根（{paths[0].RootKind}） → 目标，共 {paths[0].Nodes.Count} 层" +
                              (paths.Count > 1 ? $"；另有 {paths.Count - 1} 条备选路径（见「调用链」页）" : "");
@@ -283,18 +403,22 @@ public sealed class MainViewModel : INotifyPropertyChanged
     public async Task LoadChainInstancesAsync(TypeStat type)
     {
         if (_index == null) return;
+        if (type.IsNamespaceGroup) { MergedChainTitle = $"{type.Name} 是命名空间分组行，请关闭分组或筛选到具体类型后查看持有链"; return; }
         MergedChainTitle = $"正在构建 {type.Name} 的持有链合并树…";
         try
         {
+            IReadOnlyDictionary<ulong, long>? retained = _dom?.RetainedByAddr;
             (IReadOnlyList<InstanceInfo> insts, ReferenceIndex.MergedTreeResult tree) = await Task.Run(
-                () => (_index.GetInstances(type.Name, 500), _index.GetMergedRetentionTree(type.Name, 200, 2)));
+                () => (_index.GetInstances(type.Name, 500),
+                       _index.GetMergedRetentionTree(type.Name, 200, 2, retained)));
 
+            FillRetained(insts);
             ChainInstances.Clear();
             foreach (var i in insts) ChainInstances.Add(i);
 
             MergedChainRoots.Clear();
             MergedChainRoots.Add(ToTreeNode(tree.Root));
-            MergedChainTitle = $"{type.Name}：{tree.LinkedInstances}/{tree.TotalInstances} 个实例、{tree.TotalPaths} 条持有链（按持有者类型+字段合并聚合）";
+            MergedChainTitle = $"{type.Name}：{tree.LinkedInstances}/{tree.TotalInstances} 个实例、{tree.TotalPaths} 条持有链（按持有者类型+字段合并聚合，含 Retained）";
             ChainTitle = $"{type.Name}：{insts.Count} 个实例 —— 选择实例查看单条调用链，或查看右侧合并持有链树";
         }
         catch (Exception ex) { MergedChainTitle = "构建失败: " + ex.Message; }
@@ -305,7 +429,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
     {
         string title = n.TypeName == "GC 根"
             ? "GC 根"
-            : $"{n.TypeName}{(n.Field != null ? $"（经 .{n.Field} 持有）" : "")}  —  经此持有 {n.TargetCount} 个目标实例 · 本层 {n.ObjectCount} 个对象 · {FormatBytes(n.TotalSize)}";
+            : $"{n.TypeName}{(n.Field != null ? $"（经 .{n.Field} 持有）" : "")}  —  经此持有 {n.TargetCount} 个目标实例 · 本层 {n.ObjectCount} 个对象 · {FormatBytes(n.TotalSize)} · 保留 {FormatBytes(n.RetainedSize)}";
         var node = new ChainTreeNode
         {
             Kind = ChainNodeKind.Merged,
@@ -316,27 +440,48 @@ public sealed class MainViewModel : INotifyPropertyChanged
         return node;
     }
 
-    /// <summary>即时显示某对象的调用链（保留路径）+ 全部直接引用者。</summary>
+    /// <summary>
+    /// 即时显示某对象的调用链（保留路径）+ 全部直接引用者。
+    /// 计算在后台线程执行（BFS/DFS 最坏可达数十万状态），UI 线程只做集合更新；
+    /// 用序号令牌丢弃过期结果——连续快速切换实例时只显示最后一次的调用链（Bug 3 修复）。
+    /// </summary>
     public void ShowChainForAddress(ulong addr)
     {
-        if (_index == null) return;
-        try
+        ReferenceIndex? index = _index;
+        if (index == null) return;
+        int seq = Interlocked.Increment(ref _chainSeq);
+        ChainTitle = $"正在计算 0x{addr:X12} 的调用链…";
+        _ = Task.Run(() =>
         {
-            IReadOnlyList<RetentionPath> paths = _index.GetRetentionPaths(addr, 3);
-            IReadOnlyList<ReferenceIndex.ReferrerInfo> refs = _index.GetReferrerInfos(addr);
+            try
+            {
+                IReadOnlyList<RetentionPath> paths = index.GetRetentionPaths(addr, 3);
+                IReadOnlyList<ReferenceIndex.ReferrerInfo> refs = index.GetReferrerInfos(addr);
+                string label = index.GetBrief(addr).TypeName;
 
-            ChainPaths.Clear();
-            for (int i = 0; i < paths.Count; i++)
-                ChainPaths.Add(new ChainPathVm(i + 1, paths[i]));
-            ChainReferrers.Clear();
-            foreach (var r in refs) ChainReferrers.Add(r);
-
-            string label = _index.GetBrief(addr).TypeName;
-            ChainTitle = paths.Count == 0
-                ? $"0x{addr:X12}（{label}）：未找到到 GC 根的引用链（对象可能不可达）"
-                : $"0x{addr:X12}（{label}）的调用链：{paths.Count} 条保留路径（根类型 {paths[0].RootKind}），另有 {refs.Count} 个直接引用者";
-        }
-        catch (Exception ex) { ChainTitle = "分析失败: " + ex.Message; }
+                // 回 UI 线程更新集合；若期间用户已选择其他对象（seq 过期）则丢弃本次结果
+                Application.Current?.Dispatcher.Invoke(() =>
+                {
+                    if (seq != _chainSeq) return;
+                    FillRetained(paths.SelectMany(p => p.Nodes));
+                    ChainPaths.Clear();
+                    for (int i = 0; i < paths.Count; i++)
+                        ChainPaths.Add(new ChainPathVm(i + 1, paths[i]));
+                    ChainReferrers.Clear();
+                    foreach (var r in refs) ChainReferrers.Add(r);
+                    ChainTitle = paths.Count == 0
+                        ? $"0x{addr:X12}（{label}）：未找到到 GC 根的引用链（对象可能不可达）"
+                        : $"0x{addr:X12}（{label}）的调用链：{paths.Count} 条保留路径（根类型 {paths[0].RootKind}），另有 {refs.Count} 个直接引用者";
+                });
+            }
+            catch (Exception ex)
+            {
+                Application.Current?.Dispatcher.Invoke(() =>
+                {
+                    if (seq == _chainSeq) ChainTitle = "分析失败: " + ex.Message;
+                });
+            }
+        });
     }
 
     /// <summary>引用树节点首次展开时懒加载下级引用。</summary>
@@ -439,7 +584,14 @@ public sealed class MainViewModel : INotifyPropertyChanged
         return $"{(b < 0 ? "-" : "")}{v:0.##} {units[u]}";
     }
 
-    public void Close() { _analyzer?.Dispose(); _analyzer = null; _index = null; }
+    public void Close()
+    {
+        Interlocked.Increment(ref _chainSeq); // 作废未完成的调用链计算
+        _analyzer?.Dispose();
+        _analyzer = null;
+        _index = null;
+        _dom = null;
+    }
 
     // ---- 绑定辅助 ----
     private bool Set<T>(ref T field, T value, [CallerMemberName] string? name = null)

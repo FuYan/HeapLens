@@ -6,15 +6,17 @@
 //   SmokeTest index <dump文件>                     构建引用索引并输出统计（含耗时）
 //   SmokeTest chains <dump文件> <类型> [N]          查看某类型前 N 个实例的调用链（保留路径）
 //   SmokeTest refs <dump文件> <对象地址(hex)>       查看对象的直接引用者 / 被引用对象
-//   SmokeTest merged <dump文件> <类型> [N]           类型所有实例的持有链合并树（对标 dotMemory）
+//   SmokeTest merged <dump文件> <类型> [N]           类型所有实例的持有链合并树（对标 dotMemory，含 Retained）
 //   SmokeTest retained <dump文件> [--verify]         支配树 Retained Size（含正确性校验）
+//   SmokeTest dominators <dump文件> [N]              Retained Size 最大的 N 个对象（Dominators 视图）
+//   SmokeTest strings <dump文件> [关键字]             字符串搜索（按内容分组，对标 dotMemory Strings）
 //   SmokeTest diff <dumpA> <dumpB>                 快照对比
 using System.Diagnostics;
 using HeapLens.Core;
 
 if (args.Length == 0)
 {
-    Console.WriteLine("用法: SmokeTest capture <pid> <dump> | analyze <dump> [--top N] | instances <dump> <类型> [N] | path <dump> <addr> | index <dump> | chains <dump> <类型> [N] | refs <dump> <addr> | merged <dump> <类型> [N] | retained <dump> [--verify] | diff <a> <b>");
+    Console.WriteLine("用法: SmokeTest capture <pid> <dump> | analyze <dump> [--top N] | instances <dump> <类型> [N] | path <dump> <addr> | index <dump> | chains <dump> <类型> [N] | refs <dump> <addr> | merged <dump> <类型> [N] | retained <dump> [--verify] | dominators <dump> [N] | strings <dump> [关键字] | diff <a> <b>");
     return 0;
 }
 
@@ -146,8 +148,10 @@ switch (args[0])
         using var an = HeapAnalyzer.OpenDump(args[1]);
         Console.WriteLine("构建引用索引…");
         ReferenceIndex idx = ReferenceIndex.Build(an.Heap);
+        Console.WriteLine("计算支配树 Retained Size…");
+        DominatorAnalysis dom = DominatorAnalysis.Run(idx);
         Console.WriteLine($"构建 {args[2]} 的持有链合并树（前 {limit} 个实例）…");
-        ReferenceIndex.MergedTreeResult tree = idx.GetMergedRetentionTree(args[2], limit, 2);
+        ReferenceIndex.MergedTreeResult tree = idx.GetMergedRetentionTree(args[2], limit, 2, dom.RetainedByAddr);
         Console.WriteLine($"覆盖：{tree.LinkedInstances}/{tree.TotalInstances} 个实例找到持有链，共 {tree.TotalPaths} 条路径（每实例最多 2 条）");
         PrintMergedTree(tree.Root, "", args[2]);
         return 0;
@@ -178,6 +182,31 @@ switch (args[0])
             Console.WriteLine($"{Trunc(r.Name, 60),-60} {FormatBytes(r.RetainedSize),14}");
         return 0;
     }
+    case "dominators":
+    {
+        int limit = args.Length > 2 ? int.Parse(args[2]) : 20;
+        using var an = HeapAnalyzer.OpenDump(args[1]);
+        Console.WriteLine("构建引用索引…");
+        ReferenceIndex idx = ReferenceIndex.Build(an.Heap);
+        Console.WriteLine("计算支配树…");
+        DominatorAnalysis dom = DominatorAnalysis.Run(idx);
+        Console.WriteLine($"\n{"地址",-14} {"Retained",14} {"大小",12}  类型");
+        foreach (DominatorRow d in dom.GetTopDominators(limit))
+            Console.WriteLine($"0x{d.Address:X12}  {FormatBytes(d.RetainedSize),14} {FormatBytes(d.Size),12}  {Trunc(d.TypeName, 64)}");
+        return 0;
+    }
+    case "strings":
+    {
+        string keyword = args.Length > 2 ? args[2] : "";
+        using var an = HeapAnalyzer.OpenDump(args[1]);
+        Console.WriteLine(keyword.Length > 0 ? $"搜索包含「{keyword}」的字符串…" : "扫描全部字符串…");
+        StringSearchResult result = an.SearchStrings(keyword, 30);
+        Console.WriteLine($"扫描 {result.ScannedCount:N0} 个字符串实例，匹配 {result.MatchedCount:N0} 个、{result.Groups.Count} 组{(result.Truncated ? "（已达扫描上限）" : "")}");
+        Console.WriteLine($"\n{"出现次数",10} {"总大小",12}  内容");
+        foreach (StringGroup g in result.Groups)
+            Console.WriteLine($"{g.Count,10:N0} {FormatBytes(g.TotalSize),12}  {Trunc(g.Value, 80)}");
+        return 0;
+    }
     case "diff":
     {
         using var a = HeapAnalyzer.OpenDump(args[1]);
@@ -198,7 +227,7 @@ static void PrintMergedTree(MergedChainNode node, string indent, string targetTy
     string via = node.Field != null ? $"（经 .{Trunc(node.Field, 24)} 持有）" : "";
     string label = node.TypeName == "GC 根"
         ? "GC 根"
-        : $"{Trunc(node.TypeName, 64)}{via}  —  经此持有 {node.TargetCount} 个目标实例（本层 {node.ObjectCount} 个对象, {FormatBytes(node.TotalSize)}）";
+        : $"{Trunc(node.TypeName, 64)}{via}  —  经此持有 {node.TargetCount} 个目标实例（本层 {node.ObjectCount} 个对象, {FormatBytes(node.TotalSize)}, 保留 {FormatBytes(node.RetainedSize)}）";
     Console.WriteLine($"{indent}{label}");
     if (indent.Length / 2 > 20) { Console.WriteLine($"{indent}  …（层级过深已截断）"); return; }
     for (int i = 0; i < Math.Min(node.Children.Count, maxChildren); i++)

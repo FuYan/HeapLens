@@ -9,6 +9,7 @@ public sealed class DominatorAnalysis
 {
     private readonly Dictionary<ulong, long> _retained = new();
     private readonly Dictionary<string, List<long>> _byType = new(StringComparer.Ordinal);
+    private readonly List<(ulong Addr, string TypeName, long Size, long Retained)> _rows = new();
 
     public long ReachableCount { get; private set; }
     public long UnreachableCount { get; private set; }
@@ -55,6 +56,7 @@ public sealed class DominatorAnalysis
                 if (!analysis._byType.TryGetValue(name, out List<long>? list))
                     analysis._byType[name] = list = new List<long>();
                 list.Add(r);
+                analysis._rows.Add((addr, name, g.ShallowSizes[v], r));
             }
         }
         progress?.Invoke(n);
@@ -63,6 +65,19 @@ public sealed class DominatorAnalysis
 
     /// <summary>单对象 Retained Size。</summary>
     public long GetRetained(ulong addr) => _retained.TryGetValue(addr, out long r) ? r : 0;
+
+    /// <summary>地址 → Retained Size 全量映射（供实例表 / 保留路径 / 合并树填充 Retained 用）。</summary>
+    public IReadOnlyDictionary<ulong, long> RetainedByAddr => _retained;
+
+    /// <summary>Retained Size 最大的前 limit 个对象（Dominators 视图，对标 dotMemory Dominators）。</summary>
+    public IReadOnlyList<DominatorRow> GetTopDominators(int limit)
+    {
+        var list = new List<DominatorRow>(_rows.Count);
+        foreach ((ulong addr, string name, long size, long retained) in _rows)
+            list.Add(new DominatorRow { Address = addr, TypeName = name, Size = size, RetainedSize = retained });
+        list.Sort((a, b) => b.RetainedSize.CompareTo(a.RetainedSize));
+        return list.Count > limit ? list.GetRange(0, limit) : list;
+    }
 
     /// <summary>按类型聚合的 Retained Size（对标 dotMemory Retained bytes 列）。</summary>
     public IReadOnlyList<RetainedInfo> GetRetainedByType()

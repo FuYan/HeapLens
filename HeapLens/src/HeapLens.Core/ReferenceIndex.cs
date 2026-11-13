@@ -310,13 +310,14 @@ public sealed class ReferenceIndex
 
     // ---------- 合并持有链（对标 dotMemory merged retention paths） ----------
 
-    /// <summary>构建期临时节点：按地址去重聚合对象数/大小。</summary>
+    /// <summary>构建期临时节点：按地址去重聚合对象数/大小/保留大小。</summary>
     private sealed class MBNode
     {
         public string TypeName = "";
         public string? Field;
         public readonly HashSet<ulong> TargetAddrs = new();
         public readonly Dictionary<ulong, long> AddrSizes = new();
+        public readonly Dictionary<ulong, long> AddrRetained = new();
         public readonly List<MBNode> Children = new();
         public MBNode? FindChild(string type, string? field)
             => Children.FirstOrDefault(c => c.TypeName == type && c.Field == field);
@@ -328,9 +329,11 @@ public sealed class ReferenceIndex
     /// <summary>
     /// 某类型所有实例的持有链合并树（GC 根 → 目标类型）：
     /// 取该类型前 maxInstances 个实例（按大小降序）各至多 maxPathsPerInstance 条保留路径，
-    /// 按 (持有者类型, 字段) 逐层合并聚合，节点显示经此持有的目标实例数 / 去重对象数 / 大小合计。
+    /// 按 (持有者类型, 字段) 逐层合并聚合，节点显示经此持有的目标实例数 / 去重对象数 / 大小合计 / 保留大小合计。
+    /// retainedByAddr 传入支配树 Retained 映射（DominatorAnalysis.RetainedByAddr）时，节点聚合 Retained。
     /// </summary>
-    public MergedTreeResult GetMergedRetentionTree(string typeName, int maxInstances = 200, int maxPathsPerInstance = 2)
+    public MergedTreeResult GetMergedRetentionTree(string typeName, int maxInstances = 200, int maxPathsPerInstance = 2,
+        IReadOnlyDictionary<ulong, long>? retainedByAddr = null)
     {
         var root = new MBNode { TypeName = "GC 根" };
         IReadOnlyList<InstanceInfo> insts = GetInstances(typeName, maxInstances);
@@ -341,21 +344,23 @@ public sealed class ReferenceIndex
             if (paths.Count > 0) linked++;
             totalPaths += paths.Count;
             foreach (RetentionPath path in paths)
-                MergePath(root, path, inst.Address);
+                MergePath(root, path, inst.Address, retainedByAddr);
         }
         AggregateTargets(root);
         return new MergedTreeResult(Materialize(root), insts.Count, linked, totalPaths);
     }
 
     /// <summary>把一条根→目标的保留路径合并进持有链树（按类型名+字段聚合，地址去重）。</summary>
-    private static void MergePath(MBNode root, RetentionPath path, ulong targetAddr)
+    private static void MergePath(MBNode root, RetentionPath path, ulong targetAddr, IReadOnlyDictionary<ulong, long>? retainedByAddr)
     {
         if (path.Nodes.Count == 0) return;
         MBNode cur = root;
         for (int i = 0; i < path.Nodes.Count; i++)
         {
             RetentionNode n = path.Nodes[i];
-            string? field = i == 0 ? null : path.Nodes[i - 1].FieldName; // 父节点经由该字段持有本节点
+            // BuildPath 赋予节点的 FieldName 语义是"被父节点经此字段持有"（入边字段），
+            // 因此本节点的合并键字段应取 path.Nodes[i].FieldName（修复原取 [i-1] 的错位 bug）。
+            string? field = i == 0 ? null : n.FieldName;
             MBNode? child = cur.FindChild(n.TypeName, field);
             if (child == null)
             {
@@ -363,6 +368,7 @@ public sealed class ReferenceIndex
                 cur.Children.Add(child);
             }
             child.AddrSizes[n.Address] = n.Size;
+            child.AddrRetained[n.Address] = retainedByAddr != null && retainedByAddr.TryGetValue(n.Address, out long r) ? r : n.Size;
             cur = child;
         }
         cur.TargetAddrs.Add(targetAddr); // 叶子 = 目标实例
@@ -387,6 +393,7 @@ public sealed class ReferenceIndex
             TargetCount = n.TargetAddrs.Count,
             ObjectCount = n.AddrSizes.Count,
             TotalSize = n.AddrSizes.Values.Sum(),
+            RetainedSize = n.AddrRetained.Values.Sum(),
         };
         foreach (MBNode c in n.Children) node.Children.Add(Materialize(c));
         node.Children.Sort((a, b) => b.TargetCount.CompareTo(a.TargetCount));

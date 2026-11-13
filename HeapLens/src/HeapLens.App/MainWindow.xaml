@@ -144,7 +144,8 @@
                         <StackPanel Orientation="Horizontal">
                             <TextBlock Text="筛选类型:" VerticalAlignment="Center" Margin="0,0,8,0" Foreground="{StaticResource TextSecondaryBrush}"/>
                             <TextBox Width="320" Text="{Binding TypeFilter, UpdateSourceTrigger=PropertyChanged}" Padding="6,4" VerticalAlignment="Center"/>
-                            <TextBlock Text="（双击行查看实例与保留路径）" VerticalAlignment="Center" Margin="16,0,0,0" Foreground="{StaticResource TextSecondaryBrush}" FontSize="12"/>
+                            <CheckBox Content="按命名空间分组" IsChecked="{Binding NamespaceGrouping}" VerticalAlignment="Center" Margin="16,0,0,0"/>
+                            <TextBlock Text="（支持 * ? 通配符、re: 正则；双击行查看实例与保留路径）" VerticalAlignment="Center" Margin="16,0,0,0" Foreground="{StaticResource TextSecondaryBrush}" FontSize="12"/>
                         </StackPanel>
                     </Border>
                     <DataGrid x:Name="TypesGrid" ItemsSource="{Binding Types}" MouseDoubleClick="TypesGrid_OnMouseDoubleClick">
@@ -179,6 +180,7 @@
                             <DataGrid.Columns>
                                 <DataGridTextColumn Header="地址" Binding="{Binding Address, Converter={StaticResource Hex}}" Width="130"/>
                                 <DataGridTextColumn Header="大小" Binding="{Binding Size, Converter={StaticResource Bytes}}" Width="80"/>
+                                <DataGridTextColumn Header="保留" Binding="{Binding RetainedSize, Converter={StaticResource Bytes}}" Width="80"/>
                                 <DataGridTextColumn Header="预览" Binding="{Binding Preview}" Width="*"/>
                             </DataGrid.Columns>
                         </DataGrid>
@@ -203,6 +205,9 @@
                                                 <StackPanel Orientation="Horizontal" Margin="0,4,0,0">
                                                     <TextBlock Text="{Binding Address, Converter={StaticResource Hex}}" Foreground="{StaticResource TextSecondaryBrush}" FontSize="11" Width="120"/>
                                                     <TextBlock Text="{Binding Size, Converter={StaticResource Bytes}}" Foreground="{StaticResource TextSecondaryBrush}" FontSize="11" Width="70"/>
+                                                    <TextBlock Foreground="{StaticResource TextSecondaryBrush}" FontSize="11" Width="110" ToolTip="保留大小 Retained Size：该对象被释放时可一并回收的内存总量">
+                                                        <Run Text="保留 "/><Run Text="{Binding RetainedSize, Converter={StaticResource Bytes}}"/>
+                                                    </TextBlock>
                                                     <TextBlock Text="{Binding Preview}" Foreground="{StaticResource TextSecondaryBrush}" FontSize="11"/>
                                                 </StackPanel>
                                             </StackPanel>
@@ -251,6 +256,7 @@
                                 <DataGrid.Columns>
                                     <DataGridTextColumn Header="地址" Binding="{Binding Address, Converter={StaticResource Hex}}" Width="120"/>
                                     <DataGridTextColumn Header="大小" Binding="{Binding Size, Converter={StaticResource Bytes}}" Width="70"/>
+                                    <DataGridTextColumn Header="保留" Binding="{Binding RetainedSize, Converter={StaticResource Bytes}}" Width="70"/>
                                     <DataGridTextColumn Header="预览" Binding="{Binding Preview}" Width="*"/>
                                 </DataGrid.Columns>
                             </DataGrid>
@@ -383,6 +389,47 @@
                         </Grid>
                     </Grid>
                 </Grid>
+            </TabItem>
+
+            <!-- ============ 支配对象（Dominators） ============ -->
+            <TabItem Header="支配对象">
+                <DockPanel Margin="4">
+                    <Border DockPanel.Dock="Top" Padding="0,0,0,10">
+                        <TextBlock Text="{Binding DominatorsTitle}" Foreground="{StaticResource TextSecondaryBrush}" TextWrapping="Wrap"/>
+                    </Border>
+                    <DataGrid ItemsSource="{Binding Dominators}">
+                        <DataGrid.Columns>
+                            <DataGridTextColumn Header="地址" Binding="{Binding Address, Converter={StaticResource Hex}}" Width="130"/>
+                            <DataGridTextColumn Header="类型" Binding="{Binding TypeName}" Width="*"/>
+                            <DataGridTextColumn Header="大小" Binding="{Binding Size, Converter={StaticResource Bytes}}" Width="110"/>
+                            <DataGridTextColumn Header="保留大小" Binding="{Binding RetainedSize, Converter={StaticResource Bytes}}" Width="120"/>
+                        </DataGrid.Columns>
+                    </DataGrid>
+                </DockPanel>
+            </TabItem>
+
+            <!-- ============ 字符串搜索 ============ -->
+            <TabItem Header="字符串搜索">
+                <DockPanel Margin="4">
+                    <Border DockPanel.Dock="Top" Padding="0,0,0,10">
+                        <StackPanel>
+                            <StackPanel Orientation="Horizontal" Margin="0,0,0,6">
+                                <TextBlock Text="搜索字符串内容:" VerticalAlignment="Center" Margin="0,0,8,0" Foreground="{StaticResource TextSecondaryBrush}"/>
+                                <TextBox Width="320" Text="{Binding StringSearchKeyword, UpdateSourceTrigger=PropertyChanged}" Padding="6,4" VerticalAlignment="Center"/>
+                                <Button Content="搜索" Command="{Binding SearchStringsCommand}" Style="{StaticResource ToolButton}" Margin="8,0,0,0"
+                                        Background="{StaticResource AccentLightBrush}" BorderBrush="{StaticResource AccentBrush}" FontWeight="SemiBold"/>
+                            </StackPanel>
+                            <TextBlock Text="{Binding StringSearchTitle}" Foreground="{StaticResource TextSecondaryBrush}" TextWrapping="Wrap"/>
+                        </StackPanel>
+                    </Border>
+                    <DataGrid ItemsSource="{Binding StringResults}">
+                        <DataGrid.Columns>
+                            <DataGridTextColumn Header="字符串内容" Binding="{Binding Value}" Width="*"/>
+                            <DataGridTextColumn Header="出现次数" Binding="{Binding Count, StringFormat={}{0:N0}}" Width="110"/>
+                            <DataGridTextColumn Header="总大小" Binding="{Binding TotalSize, Converter={StaticResource Bytes}}" Width="110"/>
+                        </DataGrid.Columns>
+                    </DataGrid>
+                </DockPanel>
             </TabItem>
 
             <!-- ============ 快照对比 ============ -->

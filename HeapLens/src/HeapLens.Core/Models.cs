@@ -16,6 +16,8 @@ public sealed class TypeStat
     public double AvgSize => Count == 0 ? 0 : (double)TotalSize / Count;
     /// <summary>保留大小合计（支配树 Retained Size，对标 dotMemory Retained bytes）。</summary>
     public long RetainedSize { get; set; }
+    /// <summary>是否为命名空间聚合行（命名空间分组视图用）。</summary>
+    public bool IsNamespaceGroup { get; set; }
 }
 
 /// <summary>堆段（segment）信息。</summary>
@@ -69,6 +71,8 @@ public sealed class RetentionNode
     public string TypeName { get; set; } = "";
     public string? FieldName { get; set; }
     public long Size { get; set; }
+    /// <summary>该节点对象的保留大小（支配树 Retained，单对象 Retained 显示）。</summary>
+    public long RetainedSize { get; set; }
     public string? Preview { get; set; }
 }
 
@@ -84,6 +88,8 @@ public sealed class InstanceInfo
 {
     public ulong Address { get; set; }
     public long Size { get; set; }
+    /// <summary>该实例的保留大小（支配树 Retained）。</summary>
+    public long RetainedSize { get; set; }
     public string? Preview { get; set; }
 }
 
@@ -95,7 +101,7 @@ public sealed class MergedChainNode
 {
     /// <summary>持有者类型名（叶子层为目标类型）。</summary>
     public string TypeName { get; set; } = "";
-    /// <summary>经由哪个字段持有下一层（叶子为空）。</summary>
+    /// <summary>被父节点经该字段持有（与 RetentionNode.FieldName 语义一致；根下第一层为空）。</summary>
     public string? Field { get; set; }
     /// <summary>经此节点持有到的目标实例数。</summary>
     public int TargetCount { get; set; }
@@ -103,6 +109,8 @@ public sealed class MergedChainNode
     public int ObjectCount { get; set; }
     /// <summary>该层级聚合对象的浅大小合计。</summary>
     public long TotalSize { get; set; }
+    /// <summary>该层级聚合对象的保留大小合计（支配树 Retained，对标 dotMemory 合并树节点 Retained）。</summary>
+    public long RetainedSize { get; set; }
     public List<MergedChainNode> Children { get; } = new();
 }
 
@@ -111,6 +119,38 @@ public sealed class RetainedInfo
 {
     public string Name { get; set; } = "";
     public long RetainedSize { get; set; }
+}
+
+/// <summary>支配对象行（Dominators 视图：Retained Size 最大的对象）。</summary>
+public sealed class DominatorRow
+{
+    public ulong Address { get; set; }
+    public string TypeName { get; set; } = "";
+    public long Size { get; set; }
+    public long RetainedSize { get; set; }
+}
+
+/// <summary>字符串搜索结果组（按字符串内容分组，对标 dotMemory Strings 视图）。</summary>
+public sealed class StringGroup
+{
+    /// <summary>字符串内容（超长截断至 160 字符显示）。</summary>
+    public string Value { get; set; } = "";
+    /// <summary>相同内容的实例数。</summary>
+    public int Count { get; set; }
+    /// <summary>该组实例总大小（浅大小合计）。</summary>
+    public long TotalSize { get; set; }
+}
+
+/// <summary>字符串搜索汇总结果。</summary>
+public sealed class StringSearchResult
+{
+    public List<StringGroup> Groups { get; } = new();
+    /// <summary>匹配到的字符串实例总数（去重前）。</summary>
+    public int MatchedCount { get; set; }
+    /// <summary>扫描的字符串实例总数。</summary>
+    public int ScannedCount { get; set; }
+    /// <summary>是否因扫描上限截断。</summary>
+    public bool Truncated { get; set; }
 }
 
 /// <summary>快照 diff 行。</summary>

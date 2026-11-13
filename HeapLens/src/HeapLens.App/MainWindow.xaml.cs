@@ -16,10 +16,10 @@ public partial class MainWindow : Window
         Closed += (_, _) => _vm.Close();
     }
 
-    /// <summary>双击类型行 → 切到"对象与保留路径"页并加载实例。</summary>
+    /// <summary>双击类型行 → 切到"对象与保留路径"页并加载实例（命名空间分组行不响应）。</summary>
     private void TypesGrid_OnMouseDoubleClick(object sender, MouseButtonEventArgs e)
     {
-        if (TypesGrid.SelectedItem is TypeStat type && _vm.ShowInstancesCommand.CanExecute(type))
+        if (TypesGrid.SelectedItem is TypeStat { IsNamespaceGroup: false } type && _vm.ShowInstancesCommand.CanExecute(type))
         {
             _vm.ShowInstancesCommand.Execute(type);
             if (TabControlInstance() is { } tabs) tabs.SelectedIndex = 2;
@@ -28,10 +28,10 @@ public partial class MainWindow : Window
 
     // ---------- 调用链页 ----------
 
-    /// <summary>双击类型 → 在下方列出该类型的实例，并在右侧生成持有链合并树。</summary>
+    /// <summary>双击类型 → 在下方列出该类型的实例，并在右侧生成持有链合并树（命名空间分组行不响应）。</summary>
     private void ChainTypesGrid_OnMouseDoubleClick(object sender, MouseButtonEventArgs e)
     {
-        if (ChainTypesGrid.SelectedItem is TypeStat type) _ = _vm.LoadChainInstancesAsync(type);
+        if (ChainTypesGrid.SelectedItem is TypeStat { IsNamespaceGroup: false } type) _ = _vm.LoadChainInstancesAsync(type);
     }
 
     /// <summary>双击实例 → 立即显示调用链（选中即显示，双击仅聚焦）。</summary>
